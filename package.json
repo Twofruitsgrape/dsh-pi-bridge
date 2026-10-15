@@ -1,0 +1,66 @@
+{
+  "name": "dsh-pi-bridge",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "One plugin, two hosts: installs into the pi coding agent and into DeepSeek Harness, and bridges the ecosystems. In DSH a pi_install tool turns pi packages into native DSH tools, commands and skills; in pi a /dsh-install command turns DSH plugin bundles into pi tools and commands. Same code, both entry conventions, published on npm so both plugin markets find it.",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "test": "node scripts/selftest.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "bridge",
+    "compatibility",
+    "cross-host",
+    "plugin-loader"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "files": [
+    "index.js",
+    "src",
+    "extensions",
+    "skills",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Twofruitsgrape/dsh-pi-bridge.git"
+  },
+  "homepage": "https://github.com/Twofruitsgrape/dsh-pi-bridge",
+  "bugs": {
+    "url": "https://github.com/Twofruitsgrape/dsh-pi-bridge/issues"
+  }
+}
