@@ -338,6 +338,110 @@ async function main () {
     check('placeholder version is purged before installing', version === '(removed)' || version === '0.0.0-bridge-missing' ? version !== '0.0.0-bridge-missing' : true, 'left-pad version now ' + version)
   }
 
+  console.log('tool definitions satisfy the host schema rules')
+  {
+    // A real DSH boot rejected the bridge entry because its output schema carried
+    // per-property required markers; the host's own defineTool accepts those, but
+    // ctx.tools.register validates the compiled form and does not. These rules
+    // come from probing the installed host, so they are the host's answer, not a
+    // guess. A mock host cannot catch this, which is why the assertion lives here.
+    const { OUT_SHAPE } = { OUT_SHAPE: null }
+    const mod = await import('../index.js')
+    void mod
+    const src = await (await import('node:fs/promises')).readFile(path.join(ROOT, 'index.js'), 'utf8')
+    const outBlock = src.slice(src.indexOf('const OUT = () => ({'), src.indexOf('})', src.indexOf('const OUT = () => ({')))
+    check('output schema carries no per-property required', !/required:/.test(outBlock), outBlock.replace(/\s+/g, ' ').slice(0, 160))
+    check('output schema is object-rooted', /type: 'object'/.test(outBlock))
+    check('output render is supplied', /render:/.test(outBlock))
+    // Parameters must reach the host as a property spec map, never raw JSON Schema:
+    // probing the host showed raw schema roots are rejected ("parameters.type must
+    // be a value schema object").
+    check('tools are defined through a spec-map helper', /parameters: toToolSpec\(/.test(src) || /function defineHostTool/.test(src))
+    check('no bare host import that a linked bundle cannot resolve', !/await import\('@deepseek-ai\//.test(src), 'found dynamic host import')
+  }
+
+  console.log('daemon launches correctly from either runtime')
+  {
+    // Inside a host, process.execPath is the app binary, so spawning it with a
+    // script argument opens another copy of the app and the daemon never comes up.
+    // A real DSH boot hit exactly this. Both cases must decide correctly, and the
+    // host case cannot be observed by running the daemon under plain node, so the
+    // decision is a pure function and asserted as one.
+    const { daemonLaunch } = await import('../src/proxy.js')
+    const RUNNER_END = path.join('daemon', 'run.mjs')
+
+    const plain = daemonLaunch({ PATH: '/usr/bin', HOME: '/root' }, 'linux', false)
+    check('plain node: no ELECTRON_RUN_AS_NODE', plain.env.ELECTRON_RUN_AS_NODE === undefined, JSON.stringify(plain.env))
+    check('plain node: runs the daemon runner', String(plain.args[0]).endsWith(RUNNER_END), String(plain.args[0]))
+
+    const host = daemonLaunch({ PATH: '/usr/bin', HOME: '/root' }, 'linux', true)
+    check('inside Electron: asks the binary to act as node', host.env.ELECTRON_RUN_AS_NODE === '1', JSON.stringify(host.env))
+
+    // A GUI-launched host has no global npm bin in PATH, which is why the daemon's
+    // own spawn of pi failed; the launcher must add where pi actually lives. Build a
+    // fake install tree so the discovery rule is exercised against real files.
+    const fakeHome = path.join(HOME, 'fake-win-home')
+    const npmBin = path.join(fakeHome, 'AppData', 'Roaming', 'npm')
+    await mkdir(npmBin, { recursive: true })
+    await writeFile(path.join(npmBin, 'pi.cmd'), '@echo off\n', 'utf8')
+    const win = daemonLaunch({ PATH: 'C:\\Windows', USERPROFILE: fakeHome }, 'win32', true)
+    const pathAdded = String(win.env.PATH || '')
+    check('win32 host: PATH gains the npm global bin holding pi', pathAdded.includes('npm') && pathAdded.includes('Windows'), pathAdded.slice(0, 160))
+    check('win32 host: existing PATH entries are kept', pathAdded.includes('Windows'), pathAdded.slice(0, 160))
+    // A home without pi must not invent a PATH entry.
+    const bare = daemonLaunch({ PATH: 'C:\\Windows', USERPROFILE: path.join(HOME, 'nobody-here') }, 'win32', true)
+    check('win32 host: no pi means no PATH change', bare.env.PATH === undefined, JSON.stringify(bare.env))
+    // No silent daemon.log write: an unwritable cache must not fail a call.
+    const { loadForeign: lf } = await import('../src/load.js')
+    check('proxy module exports ensureDaemon', typeof (await import('../src/proxy.js')).ensureDaemon === 'function')
+    void lf
+  }
+
+  console.log('every runtime file is published')
+  {
+    // The proxy spawns daemon/run.mjs, and run.mjs loads daemon/bootstrap.js into
+    // pi. Neither was in package.json "files", so an installed bridge died with
+    // MODULE_NOT_FOUND while every local test still passed: tests ran from the
+    // repository, installs ran from the tarball. A real DSH boot caught it.
+    const { readFile: rf } = await import('node:fs/promises')
+    const pkg = JSON.parse(await rf(path.join(ROOT, 'package.json'), 'utf8'))
+    /**
+     * Does a package.json "files" entry include this path? Written as explicit
+     * rules instead of a regex: the earlier attempt embedded a character class in
+     * a template and produced an unterminated literal.
+     */
+    function covered (pattern, rel) {
+      const p = pattern.replace(/\\/g, '/')
+      const file = rel.replace(/\\/g, '/')
+      if (p.endsWith('/**')) return file.startsWith(p.slice(0, -2)) || file === p.slice(0, -3)
+      const star = p.indexOf('*')
+      if (star < 0) return file === p
+      const head = p.slice(0, star)
+      const tail = p.slice(star + 1)
+      if (!file.startsWith(head) || !file.endsWith(tail)) return false
+      // 'src/*.js' matches one segment only, so a nested path must not slip in.
+      const middle = file.slice(head.length, file.length - tail.length)
+      return middle.length > 0 && !middle.includes('/')
+    }
+    const covers = (rel) => (pkg.files || []).some((pattern) => covered(pattern, rel))
+    const needed = [
+      'index.js', 'src/proxy.js', 'src/load.js', 'src/resolve.js', 'src/manifest.js',
+      'src/schema.js', 'src/capabilities.js', 'src/inert.js', 'src/restore.js',
+      'src/replay-dsh.js', 'src/replay-pi.js', 'src/capture.js', 'src/stubs.js',
+      'src/tar.js', 'src/transpile.js', 'src/typebox-shim.js',
+      'extensions/index.js', 'daemon/run.mjs', 'daemon/bootstrap.js',
+      'skills/dsh-pi-bridge/SKILL.md', 'cordis.patch.yml',
+    ]
+    const missing = needed.filter((f) => !covers(f))
+    check('package.json files covers every runtime module', missing.length === 0, 'missing from files: ' + missing.join(', '))
+    const absent = []
+    for (const f of needed) { try { await rf(path.join(ROOT, f)) } catch { absent.push(f) } }
+    check('every listed runtime module exists on disk', absent.length === 0, absent.join(', '))
+    // The daemon's own path expression must land on a published file.
+    const proxySrc = await rf(path.join(ROOT, 'src', 'proxy.js'), 'utf8')
+    check('proxy resolves the runner from the package root', /RUNNER = path\.join\(ROOT, 'daemon', 'run\\.mjs'\)/.test(proxySrc) || /'daemon',\s*'run\.mjs'/.test(proxySrc), proxySrc.match(/const RUNNER[^\n]*/)?.[0] || 'no RUNNER const')
+  }
+
   console.log('caches stay outside the published tree')
   {
     // A 1.9 GB npm-install tree once landed under scripts/: files:["scripts"] would

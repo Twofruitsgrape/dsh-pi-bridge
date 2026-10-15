@@ -1,6 +1,6 @@
 {
   "name": "dsh-pi-bridge",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "description": "One plugin, two hosts: installs into the pi coding agent and into DeepSeek Harness, and bridges the ecosystems. In DSH a pi_install tool turns pi packages into native DSH tools, commands and skills; in pi a /dsh-install command turns DSH plugin bundles into pi tools and commands. Same code, both entry conventions, published on npm so both plugin markets find it.",
   "main": "./index.js",
@@ -47,6 +47,8 @@
     "src/*.js",
     "extensions/index.js",
     "skills/dsh-pi-bridge/SKILL.md",
+    "daemon/run.mjs",
+    "daemon/bootstrap.js",
     "scripts/selftest.mjs",
     "scripts/entry-check.mjs",
     "scripts/run-all.mjs",

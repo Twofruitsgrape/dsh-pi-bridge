@@ -15,6 +15,7 @@ import { existsSync } from 'node:fs'
 import { appendFile, mkdir } from 'node:fs/promises'
 import http from 'node:http'
 import path from 'node:path'
+import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { resolve as resolveSource, installDependencies, CACHE_ROOT } from './resolve.js'
 import { classify, piEntries } from './manifest.js'
@@ -56,6 +57,47 @@ async function record (line) {
 async function health (ms = 4000) { return request('GET', '/health', null, ms) }
 
 /**
+ * Decide how to launch the daemon, given the environment it is launched from.
+ *
+ * Inside a host process process.execPath is the application binary, not node, so
+ * spawning it with a script argument starts another copy of the app instead of
+ * running the script. Electron honours ELECTRON_RUN_AS_NODE to act as node, so
+ * that is added when the parent is Electron. A GUI-launched host may also carry a
+ * PATH without the global npm bin where pi lives, which would make the daemon's
+ * own spawn of pi fail, so pi's directory is appended when found.
+ *
+ * Exported for tests: this decision is invisible to a plain-node test run and
+ * only bites inside a host.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {string} [platform]
+ * @param {boolean} [isElectron] injectable so tests can cover the host case
+ * @returns {{command:string, args:string[], env:Record<string,string>}}
+ */
+export function daemonLaunch (env = process.env, platform = process.platform, isElectron = !!process.versions.electron) {
+  const sep = platform === 'win32' ? ';' : ':'
+  const home = env.USERPROFILE || env.HOME || os.homedir()
+  const candidates = platform === 'win32'
+    ? [path.join(home, 'AppData', 'Roaming', 'npm')]
+    : ['/usr/local/bin', '/usr/bin', path.join(home, '.local', 'bin')]
+  const extra = candidates.filter((d) => {
+    for (const n of ['pi.cmd', 'pi']) { try { if (existsSync(path.join(d, n))) return true } catch { /* skip */ } }
+    return false
+  })
+
+  const out = {}
+  const command = env.DSH_PI_BRIDGE_NODE || process.execPath
+  if (isElectron) out.ELECTRON_RUN_AS_NODE = '1'
+  if (extra.length) {
+    const current = env.PATH || env.Path || ''
+    const have = new Set(current.split(sep).filter(Boolean))
+    const add = extra.filter((d) => !have.has(d))
+    if (add.length) out.PATH = current ? add.join(sep) + sep + current : add.join(sep)
+  }
+  return { command, args: [RUNNER, '--packages', '[]', '--port', String(PORT)], env: out }
+}
+
+/**
  * Start the daemon unless it is already answering. Resolves once the bootstrap
  * inside pi reports a captured extension context, because nothing can be called
  * before that.
@@ -70,10 +112,22 @@ export async function ensureDaemon (options) {
   if (starting) return starting
   starting = (async () => {
     await record('\n[' + new Date().toISOString() + '] starting daemon\n')
-    child = spawn(process.execPath, [RUNNER, '--packages', '[]', '--port', String(PORT)], {
-      cwd: ROOT, detached: false, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore'],
-      env: { ...process.env, DSH_PI_BRIDGE_IDLE_MS: String(10 * 60 * 1000) },
+    const launch = daemonLaunch()
+    child = spawn(launch.command, launch.args, {
+      cwd: ROOT, detached: false, windowsHide: true,
+      // A daemon that dies at once is undiagnosable with its output discarded,
+      // which is exactly how a host-side failure stayed opaque. Pipe both streams
+      // into the same log the parent already writes.
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ...launch.env, DSH_PI_BRIDGE_IDLE_MS: String(10 * 60 * 1000) },
     })
+    const tail = (where) => (chunk) => {
+      const text = String(chunk).slice(0, 2000)
+      void record('[' + where + '] ' + text.replace(/\r?\n$/, '') + '\n')
+    }
+    child.stdout.on('data', tail('out'))
+    child.stderr.on('data', tail('err'))
+    child.on('error', (e) => { void record('spawn failed: ' + (e && e.message) + '\n') })
     child.on('exit', (code) => { child = null; void record('daemon exited ' + code + '\n') })
     child.unref()
     for (let i = 0; i < 45; i++) {

@@ -33,13 +33,21 @@ export const inject = ['tools']
 const REGISTRY_FILE = path.join(CACHE_ROOT, 'bridges.json')
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
+/**
+ * Tool output in the shape the host's tools service validates directly.
+ *
+ * The host accepts an object root whose property values are value-schema
+ * nodes; a required marker inside a property, or an object-level required
+ * array, is rejected as unsupported. A real DSH boot proved this: an earlier
+ * version carried per-property required flags and the entry never activated.
+ */
 const OUT = () => ({
   schema: {
     type: 'object',
     additionalProperties: false,
     properties: {
-      ok: { type: 'boolean', required: true },
-      result: { type: 'string', required: true },
+      ok: { type: 'boolean' },
+      result: { type: 'string' },
     },
   },
   render: (_args, value) => [{ type: 'text', text: (value && value.result) || '' }],
@@ -53,14 +61,21 @@ function guarded (fn) {
   }
 }
 
-/** The host defineTool when the profile composes dsh-tools; a stand-in otherwise. */
-async function toolCompiler () {
-  try {
-    const mod = await import('@deepseek-ai/dsh-tools')
-    if (typeof mod.defineTool === 'function') return mod.defineTool
-  } catch { /* host without the tools package (offline self-test) */ }
-  const { specToJsonSchema } = await import('./src/schema.js')
-  return (options) => ({ ...options, parameters: specToJsonSchema(options.parameters) })
+/**
+ * Build a tool definition without importing anything from the host.
+ *
+ * A bundle installed through the plugin manager is a symlink under the profile's
+ * node_modules, so a bare specifier like '@deepseek-ai/dsh-tools' has no resolve
+ * path from inside it and the import always fails; silently falling back then
+ * handed the host an uncompiled schema. The host tools service takes a property
+ * spec map and compiles it itself, so the bridge only has to hand it that shape.
+ */
+function defineHostTool (options) {
+  return {
+    ...options,
+    parameters: toToolSpec(options.parameters),
+    execute: options.execute,
+  }
 }
 
 async function readRegistry () {
@@ -125,7 +140,7 @@ async function previewText (spec) {
 
 export async function apply (ctx, config) {
   void config
-  const tool = await toolCompiler()
+  const tool = defineHostTool
   const state = await readRegistry()
   state.bridges = state.bridges || {}
   const log = (m) => { try { ctx.logger && ctx.logger.info && ctx.logger.info(m) } catch { /* ignore */ } }
