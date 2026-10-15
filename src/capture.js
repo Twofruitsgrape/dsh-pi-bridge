@@ -104,7 +104,18 @@ export function createPiRecorder (origin) {
     getState: () => undefined,
     setState: noop(unsupported, 'setState'),
   }
-  return { api: recorder, capabilities, events, unsupported }
+  // A real package uses API surface this recorder has never seen
+  // (registerMessageRenderer, and whatever ships next). Unknown methods are
+  // recorded as unsupported and return undefined so capture continues and the
+  // rest of the package still arrives.
+  const api = new Proxy(recorder, {
+    get (target, prop) {
+      if (prop in target || typeof prop !== 'string') return target[prop]
+      if (!/^register|send|append|set/.test(prop)) return target[prop]
+      return (...args) => { void args; unsupported.push(prop) }
+    },
+  })
+  return { api, capabilities, events, unsupported }
 }
 
 function noop (list, name) {
@@ -178,8 +189,20 @@ export function createDshRecorder (origin) {
       return () => {}
     },
   }
-  const bagRef = ctx
-  return { ctx, capabilities, events, unsupported, skillProviders }
+  // cordis ctx carries far more than the recorder models: provide, fork,
+  // service handles, per-plugin state. Unknown properties answer with a
+  // recording stub so one unfamiliar service cannot abort the whole capture.
+  const bagRef = new Proxy(ctx, {
+    get (target, prop) {
+      if (prop in target || typeof prop !== 'string') return target[prop]
+      if (prop === 'provide') return (spec) => spec
+      const name = prop
+      // Callable as well as chainable: real bundles write ctx.get(id),
+      // ctx.state.foo(), so the synthesized service must be a function target.
+      return recording(name, unsupported)
+    },
+  })
+  return { ctx: bagRef, capabilities, events, unsupported, skillProviders }
 }
 
 /**
@@ -216,6 +239,32 @@ async function resolveSkillProviders (providers, origin, errors) {
     }
   }
   return { skills, dirs }
+}
+
+/**
+ * A recording stand-in for a host service the recorder does not model. It is
+ * callable, chainable, and records every property or call it receives so the
+ * report can say what the package asked for.
+ * @param {string} label
+ * @param {string[]} sink
+ */
+function recording (label, sink) {
+  // Callers chain on the result: ctx.get(id)?.name, ctx.sessions.list.getSnapshot().
+  // Returning undefined there is a crash the host would never produce, so a
+  // recorded call answers with another recording.
+  const fn = function () { return recording(label + '()', sink) }
+  return new Proxy(fn, {
+    get (_t, key) {
+      // Spreadable: bundles write [...ctx.registry.values] and expect an empty
+      // enumeration rather than a TypeError when the service is faked.
+      if (key === Symbol.iterator) return function * () {}
+      if (typeof key !== 'string' || key === 'then') return undefined
+      if (key === 'name' || key === 'length' || key === 'prototype') return undefined
+      if (key === 'toString') return () => '[dsh-pi-bridge recorder ' + label + ']'
+      return (...args) => { void args; sink.push(label + '.' + key); return recording(label + '.' + key + '()', sink) }
+    },
+    apply (_t, _this, args) { void args; sink.push(label + '()'); return recording(label + '()()', sink) },
+  })
 }
 
 /**

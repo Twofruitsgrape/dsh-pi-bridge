@@ -73,6 +73,26 @@ Skills need no conversion at all — both hosts implement the
 travels. DSH providers are read asynchronously (`list()` is a promise), and the bridge awaits them
 before replay, which is how a bundle like `dsh-comsol` crosses into pi intact.
 
+## Verified against real published packages
+
+Measured with `npm run test:all` (offline suites plus the network cases), on the
+packages each ecosystem actually ships:
+
+| Bridged package | Direction | Arrived | Reported as not crossing |
+|---|---|---|---|
+| `pi-web-access@0.40.0` | pi → DSH | 4 tools, 4 commands, 6 event hooks | `registerShortcut`, 4 unmapped events |
+| `pi-subagents@0.78.0` | pi → DSH | 3 tools, 19 commands, 4 skill dirs | 33 items listed in the report |
+| `@plannotator/pi-extension@0.28.20` | pi → DSH | 216 TS files compiled, 1 skill dir | renderer registrations |
+| `dsh-comsol@1.1.1` (git) | DSH → pi / DSH | its `comsol-dsh` skill | — |
+| `dsh-cost-meter@1.8.26` | DSH → pi | nothing | correctly reports zero registrations |
+
+The last row is the honest case: a DSH plugin that is purely a UI/service
+overlay has nothing to bridge, and the preview says so instead of pretending.
+
+Bridged tools are executed in the tests, not just listed — `web_search` and
+`source_check` respond with their own argument-validation errors, which proves
+the real package logic runs under the receiving host's tool shape.
+
 ## What does not cross
 
 The bridge reports these instead of failing quietly:
@@ -102,13 +122,21 @@ captures but registers nothing.
 ## Develop
 
 ```bash
-npm test                    # 31 offline checks: both directions, mock hosts, no network
-node scripts/entry-check.mjs # loads both entries and asserts each host-facing surface
+npm test                # 34 offline checks: both directions, mock hosts, no network
+npm run test:entries    # loads both real entries and asserts the host-facing surface
+npm run test:all        # the above plus the real-package cases (needs network)
+npm run e2e             # just the published-package probes
 ```
 
 The self-test builds fixtures by hand — a TypeScript pi extension using the TypeBox builder, and a
 DSH bundle using `defineTool` with an async skill provider — then runs the full pipeline against a
-recording mock host and executes the bridged tools.
+recording mock host and executes the bridged tools. `scripts/selfhost-check.mjs` feeds this package's
+own DSH entry through the bridge, so the entry conventions are tested by the same machinery a foreign
+bundle meets.
+
+Nothing is written outside `~/.dsh-pi-bridge` (override with `DSH_PI_BRIDGE_HOME`). A bridged package
+sees only its mirrored build tree, so its relative imports work while its host imports resolve to the
+bridge's stubs.
 
 ## Layout
 

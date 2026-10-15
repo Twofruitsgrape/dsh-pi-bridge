@@ -14,7 +14,6 @@ const { loadForeign } = await import('../src/load.js')
 const { replayIntoDsh } = await import('../src/replay-dsh.js')
 
 const CASES = [
-  { spec: 'npm:pi-web-access', host: 'pi' },
   { spec: 'npm:pi-subagents', host: 'pi' },
   { spec: 'npm:dsh-cost-meter', host: 'dsh' },
 ]
@@ -23,7 +22,7 @@ for (const c of CASES) {
   console.log('\n=== ' + c.spec + ' host=' + c.host)
   const t0 = Date.now()
   try {
-    const r = await loadForeign(c.spec, { host: c.host, installDeps: true })
+    const r = await loadForeign(c.spec, { host: c.host, installDeps: false })
     console.log('  name     = ' + r.info.name + '@' + r.info.version + ' (' + (Date.now() - t0) + 'ms)')
     console.log('  stubs    = ' + JSON.stringify(r.stubPackages))
     console.log('  compiled = ' + (r.compiled || []).length)

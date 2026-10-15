@@ -113,7 +113,9 @@ export async function loadForeign (spec, options) {
   }
   const stubPackages = await makeStubs(mirror, specs, { provide, prelude: PRELUDE })
 
-  const compiled = await compileTypeScript(mirror, sources, log)
+  const build = await compileTypeScript(mirror, sources, log)
+  const compiled = build.emitted || build
+  const compileFailures = build.failures || []
 
   let captured
   const skillDirs = []
@@ -133,6 +135,7 @@ export async function loadForeign (spec, options) {
     captured = await capturePi(files, info.name)
   }
 
+  if (compileFailures.length) captured.errors = (captured.errors || []).concat(compileFailures.map(f => 'uncompiled ' + f))
   captured.info = info
   captured.host = host
   captured.mirror = mirror
@@ -179,9 +182,9 @@ async function compileTypeScript (mirror, sources, log) {
   if (!stripAvailable()) { log('no TypeScript strip support; .ts extensions may fail to load'); return [] }
   const ts = sources.filter(f => /\.(ts|mts)$/.test(f) && !/\.d\.ts$/.test(f))
   if (!ts.length) return []
-  const emitted = await emitBuild(mirror, mirror, ts)
-  log('compiled ' + emitted.length + ' TypeScript file(s)')
-  return emitted
+  const { emitted, failures } = await emitBuild(mirror, mirror, ts)
+  if (failures.length) log('TypeScript: ' + failures.length + ' file(s) could not be compiled')
+  return { emitted, failures }
 }
 
 /** Best effort: install the package's own published dependencies. */

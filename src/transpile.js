@@ -72,17 +72,22 @@ export function rewriteTsSpecifiers (code) {
  */
 export async function emitBuild (srcDir, buildDir, files) {
   const emitted = []
+  const failures = []
   for (const file of files) {
-    if (!/\.ts$/.test(file)) {
-      // Plain JS still needs a stable place in the build tree: reference source.
-      continue
-    }
+    if (!/\.ts$/.test(file)) continue
     const rel = path.relative(srcDir, file).replace(/\\/g, '/')
     const target = path.join(buildDir, rel.replace(/\.ts$/, '.mjs'))
-    const { code, compiler } = await compileTs(file)
-    await mkdir(path.dirname(target), { recursive: true })
-    await writeFile(target, rewriteTsSpecifiers(code), 'utf8')
-    emitted.push({ source: file, target, compiler })
+    try {
+      const { code, compiler } = await compileTs(file)
+      await mkdir(path.dirname(target), { recursive: true })
+      await writeFile(target, rewriteTsSpecifiers(code), 'utf8')
+      emitted.push({ source: file, target, compiler })
+    } catch (e) {
+      // One file the strip pass cannot handle (a parameter property, an enum)
+      // must not lose the whole package: the rest still loads and the report
+      // names what was skipped.
+      failures.push(rel + ': ' + (e && e.message ? String(e.message).split('\n')[0].slice(0, 140) : String(e)))
+    }
   }
-  return emitted
+  return { emitted, failures }
 }

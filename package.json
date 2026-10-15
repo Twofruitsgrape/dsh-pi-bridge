@@ -10,7 +10,10 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "test": "node scripts/selftest.mjs"
+    "test": "node scripts/selftest.mjs",
+    "test:entries": "node scripts/entry-check.mjs && node scripts/selfhost-check.mjs",
+    "test:all": "node scripts/selftest.mjs && node scripts/entry-check.mjs && node scripts/selfhost-check.mjs && node scripts/e2e-preview.mjs && node scripts/edge-cases.mjs",
+    "e2e": "node scripts/e2e-preview.mjs && node scripts/edge-cases.mjs"
   },
   "keywords": [
     "dsh",
