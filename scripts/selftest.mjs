@@ -249,6 +249,52 @@ async function main () {
   check('inert renders a named label', String(inert('x.y')) === '[dsh-pi-bridge stub: x.y]', String(inert('x.y')))
   check('inert is callable and chainable', typeof inert('z')() === 'function' && typeof inert('z').a.b.c === 'function')
 
+  console.log('bridges survive a host restart')
+  // A real DSH process reload re-runs apply() with a fresh scope. Recorded pi
+  // packages must come back as tools on their own, or "installed" would only
+  // mean "installed until the next restart".
+  const entryMod = await import('../index.js')
+  const cacheHome = process.env.DSH_PI_BRIDGE_HOME
+  const { mkdir: mk, writeFile: wf } = await import('node:fs/promises')
+  await mk(cacheHome, { recursive: true })
+  const piSpec = piDir.replace(/\\/g, '/')
+  const firstCaptured = await loadForeign(piSpec, { host: 'pi' })
+  const prefixName = 'pidemo'
+  await wf(path.join(cacheHome, 'bridges.json'), JSON.stringify({
+    bridges: {
+      [piSpec]: {
+        name: firstCaptured.info.name, version: firstCaptured.info.version, host: 'pi',
+        prefix: prefixName, mirror: firstCaptured.mirror,
+        report: { tools: ['x'], commands: [], skills: [] },
+      },
+      [path.join(cacheHome, 'no-such-package').replace(/\\/g, '/')]: { name: 'nope', version: '0', host: 'pi', prefix: 'nope', mirror: '', report: { tools: [], commands: [], skills: [] } },
+    },
+  }, null, 2), 'utf8')
+  // clear module cache so apply() reads the registry we just wrote
+  const ctx2 = mockDshCtx()
+  await entryMod.apply(ctx2, {})
+  const restoredNames = ctx2.toolsArr.map(t => t.name)
+  check('restart replays recorded pi tools', restoredNames.includes('pidemo_demo_echo'), JSON.stringify(restoredNames.slice(0, 8)))
+  check('a broken record does not block the rest', restoredNames.includes('pi_install') && restoredNames.includes('bridge_list'), JSON.stringify(restoredNames.slice(0, 3)))
+
+  console.log('restore never reaches the network')
+  {
+    const origFetch = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = (...args) => { calls++; return origFetch(...args) }
+    try {
+      const reg = path.join(cacheHome, 'bridges.json')
+      const st = JSON.parse(await (await import('node:fs/promises')).readFile(reg, 'utf8'))
+      // An npm spec with no cache entry: restore must report it, not download it.
+      st.bridges['npm:some-package-never-cached'] = { name: 'x', version: '0', host: 'pi', prefix: 'x', mirror: '', report: {} }
+      await (await import('node:fs/promises')).writeFile(reg, JSON.stringify(st), 'utf8')
+      const { restoreIntoDsh } = await import('../src/restore.js')
+      const out = await restoreIntoDsh(mockDshCtx(), st, {})
+      check('restore issues no network request', calls === 0, 'fetch calls=' + calls)
+      check('uncached bridge is reported as failed', out.failed.some(f => f.includes('some-package-never-cached')), JSON.stringify(out.failed).slice(0, 200))
+    } finally { globalThis.fetch = origFetch }
+  }
+
   console.log('dual-host self detection')
   const self = await loadForeign(ROOT, { host: 'auto' })
   check('self detected for both hosts', !!(self.info.pi && self.info.dsh), JSON.stringify(self.info.signals))

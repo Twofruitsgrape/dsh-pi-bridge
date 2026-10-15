@@ -55,12 +55,13 @@ check('missing argument is guarded', errOut.ok === false && /dsh-pi-bridge/.test
 const piMod = await import('../extensions/index.js')
 const factory = piMod.default
 check('pi entry default factory', typeof factory === 'function')
+check('pi factory is async (restore runs at load)', factory.constructor.name === 'AsyncFunction', factory.constructor.name)
 const pi = { tools: [], commands: [], events: [] }
 pi.registerTool = (t) => pi.tools.push(t)
 pi.registerCommand = (n, o) => pi.commands.push({ name: n, ...o })
 pi.on = (n, h) => { pi.events.push({ n, h }); return () => {} }
 pi.ui = { notify: () => {} }
-factory(pi)
+await factory(pi)
 const cmdNames = pi.commands.map(c => c.name)
 for (const want of ['/dsh-install', '/dsh-preview', '/bridge-list', '/bridge-remove']) {
   check('pi command registered: ' + want, cmdNames.includes(want.slice(1)), JSON.stringify(cmdNames))

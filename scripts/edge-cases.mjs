@@ -23,6 +23,11 @@ const CASES = [
   { spec: 'npm:@plannotator/pi-extension', host: 'pi', why: 'scoped npm name' },
   { spec: 'github:Twofruitsgrape/dsh-comsol', host: 'dsh', why: 'git source, skill-only DSH bundle' },
 ]
+const EXPECT = {
+  'npm:@plannotator/pi-extension': (r) => (r.compiled || []).length > 0 && r.capabilities.every(x => x.kind === 'skill' || true) && String(r.info.name).startsWith('@'),
+  'github:Twofruitsgrape/dsh-comsol': (r) => r.capabilities.some(x => x.kind === 'skill' && x.name === 'comsol-dsh'),
+}
+let failures = 0
 for (const c of CASES) {
   console.log('\n=== ' + c.spec + ' (' + c.why + ')')
   const t0 = Date.now()
@@ -36,8 +41,17 @@ for (const c of CASES) {
     console.log('  skills   = ' + JSON.stringify([...new Set((r.skillDirs || []).map(d => path.basename(d)))]))
     console.log('  unsupp   = ' + JSON.stringify([...new Set(r.unsupported || [])]))
     if (r.errors && r.errors.length) console.log('  errors   = ' + JSON.stringify(r.errors).slice(0, 300))
+    const want = EXPECT[c.spec]
+    if (want) {
+      const ok = want(r)
+      console.log('  expectation: ' + (ok ? 'met' : 'NOT MET'))
+      if (!ok) failures++
+    }
   } catch (e) {
     console.log('  CRASH: ' + String(e && e.message).split('\n')[0].slice(0, 220))
+    failures++
   }
 }
 console.log('')
+console.log(failures ? 'EDGE CASES FAILED (' + failures + ')' : 'EDGE CASES PASSED')
+process.exit(failures ? 1 : 0)

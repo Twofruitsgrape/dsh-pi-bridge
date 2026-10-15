@@ -103,10 +103,15 @@ The bridge reports these instead of failing quietly:
 - **Events without a counterpart**: a small name map covers the lifecycle overlap
   (`session_start` ↔ `agent/created`, `tool_call` ↔ `tools/pre-execute`, …); anything else is listed.
 
-Registrations land in the current session immediately. Other clients see them after a restart; the
-bridge keeps its own registry at `~/.dsh-pi-bridge/bridges.json` and remounts recorded skills on load.
-It never writes into either host’s settings, and `bridge_remove` does not unregister host state
-behind your back.
+Registrations land in the current session immediately, and each host replays the recorded bridges when
+the plugin loads, so an install survives a restart. That replay is cache-only: host startup never waits
+on a network download, and a pruned cache simply reports the bridge as unavailable until it is installed
+again. `restoreOnLoad: false` in the bundle config turns replay off.
+
+The bridge keeps its own registry at `~/.dsh-pi-bridge/bridges.json` and writes nothing into either
+host’s settings. `bridge_remove` forgets a bridge and deletes its mirror; tools already registered in
+the running process stay until restart, because silently unregistering host state would be worse than
+leaving it visible.
 
 ## Security
 

@@ -80,7 +80,11 @@ const KNOWN_HOST_PACKAGES = new Set(Object.keys(PROVIDED).concat([
  */
 export async function loadForeign (spec, options) {
   const log = (options && options.log) || (() => {})
-  const resolved = await resolveSource(spec, { log, refresh: !!(options && options.refresh) })
+  const resolved = await resolveSource(spec, {
+    log,
+    refresh: !!(options && options.refresh),
+    cacheOnly: !!(options && options.cacheOnly),
+  })
   const info = await classify(resolved.dir)
   const wanted = (options && options.host) || 'auto'
   const host = wanted === 'auto' ? (info.pi && !info.dsh ? 'pi' : info.dsh && !info.pi ? 'dsh' : 'pi') : wanted

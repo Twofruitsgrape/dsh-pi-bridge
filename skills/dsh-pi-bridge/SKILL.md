@@ -44,9 +44,12 @@ bridged package cannot reach into either host's real services or configuration.
 
 ## After installing
 
-Registrations are live in the current session. Other clients and new processes see them after a host
-restart. The bridge keeps its own registry at `C:/Users/ALICE/.dsh-pi-bridge/bridges.json` and remounts recorded
-skills on load; it never writes into either host's settings.
+Registrations are live in the current session. The bridge keeps its registry at ~/.dsh-pi-bridge/bridges.json,
+and each host replays the recorded bridges when the plugin loads, so an install survives a restart
+instead of lasting one session. That replay is cache-only: host startup never waits on a network
+download, and a pruned cache reports the bridge as unavailable until it is installed again. Set
+restoreOnLoad: false in the bundle config to turn replay off. Nothing is written into either host’s
+settings.
 
 To undo: `bridge_remove({ source })` / `/bridge-remove <source>` forgets the mirror build. Tools already
 registered in the running process stay until restart - the bridge does not unregister host state

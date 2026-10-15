@@ -21,6 +21,7 @@ import { readFile, writeFile, mkdir, rm } from 'node:fs/promises'
 import { loadForeign } from './src/load.js'
 import { replayIntoDsh, skillProviderFor } from './src/replay-dsh.js'
 import { CACHE_ROOT } from './src/resolve.js'
+import { restoreIntoDsh } from './src/restore.js'
 
 export const name = 'dsh-pi-bridge'
 /** tools is the only hard requirement; the rest degrades through ctx.inject. */
@@ -96,7 +97,7 @@ function formatReport (spec, captured, report) {
   if (report.events.length) lines.push('  events: ' + report.events.join(', '))
   if (report.skipped.length) lines.push('  skipped: ' + report.skipped.join('; '))
   if (captured.errors && captured.errors.length) lines.push('  load errors: ' + captured.errors.join('; '))
-  lines.push('  Tools are callable now; other clients see them after a DSH restart.')
+  lines.push('  Tools are callable now. On the next DSH start they are replayed from the bridge cache, so the install persists; other clients pick them up then.')
   return lines.join('\n')
 }
 
@@ -217,8 +218,13 @@ export async function apply (ctx, config) {
     if (existsSync(path.join(selfSkill, 'SKILL.md'))) scope.skills.registerProvider(() => skillProviderFor(selfSkill))
   })
 
+  // Replay recorded pi packages so an install survives a restart instead of
+  // living one session. Disabled with { restoreOnLoad: false } in bundle config.
+  const restore = (config && config.restoreOnLoad === false) ? { restored: [], failed: [] } : await restoreIntoDsh(ctx, state, { log })
+  if (restore.failed.length) { try { ctx.logger && ctx.logger.warn && ctx.logger.warn('dsh-pi-bridge restore: ' + restore.failed.join('; ')) } catch { /* ignore */ } }
+
   const count = Object.keys(state.bridges).length
-  log('dsh-pi-bridge loaded: ' + count + ' bridged package(s) on record')
+  log('dsh-pi-bridge loaded: ' + count + ' bridged package(s) on record, ' + restore.restored.length + ' replayed')
 }
 
 export default { name, inject, apply }

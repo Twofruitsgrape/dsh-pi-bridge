@@ -15,6 +15,7 @@
 import { loadForeign } from "../src/load.js";
 import { replayIntoPi } from "../src/replay-pi.js";
 import { CACHE_ROOT } from "../src/resolve.js";
+import { restoreIntoPi } from "../src/restore.js";
 
 const REGISTRY = CACHE_ROOT + "/bridges.json";
 
@@ -76,7 +77,7 @@ async function previewText(captured) {
   return lines.join("\n");
 }
 
-export default function (pi) {
+export default async function (pi) {
   async function installDsh(spec, opts) {
     const captured = await loadForeign(spec, { host: "dsh", refresh: !!(opts && opts.refresh) });
     const prefix = (opts && opts.prefix) || shortPrefix(captured.info.name);
@@ -180,6 +181,11 @@ export default function (pi) {
       }
     },
   });
+
+  // Replay recorded DSH bundles so /dsh-install survives a pi restart.
+  const state = await readState();
+  const restore = await restoreIntoPi(pi, state, { log: (m) => console.log(m) });
+  if (restore.failed.length) console.log("dsh-pi-bridge restore skipped: " + restore.failed.join("; "));
 
   pi.registerTool({
     name: "dsh_preview",

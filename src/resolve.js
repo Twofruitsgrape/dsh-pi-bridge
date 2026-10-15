@@ -66,6 +66,10 @@ export async function resolve (spec, options) {
   const dest = path.join(PACKAGES_DIR, source.type + '__' + slugFor(source))
   if (!options || !options.refresh) {
     if (await hasManifest(dest)) return { dir: dest, source, from: 'cache' }
+    // Restore-on-load must not reach the network: a host would wait on a
+    // download before it could serve the first message. Cache-missing bridges
+    // simply report themselves and install on the next explicit use.
+    if (options && options.cacheOnly) throw new Error('not in bridge cache')
   }
   await mkdir(PACKAGES_DIR, { recursive: true })
   await rm(dest, { recursive: true, force: true })
