@@ -1,0 +1,10 @@
+# Caches, logs and scratch trees never ship, even though scripts/ and tools/ are listed.
+.tmp/
+**/.tmp/
+node_modules/
+*.log
+*.tgz
+.git/
+.gitignore
+.npmignore
+market-submission.yml

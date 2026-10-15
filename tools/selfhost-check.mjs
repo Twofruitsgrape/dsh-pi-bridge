@@ -11,7 +11,7 @@ import path from 'node:path'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
-process.env.DSH_PI_BRIDGE_HOME = path.join(ROOT, 'scripts', '.selfhost-cache')
+process.env.DSH_PI_BRIDGE_HOME = path.join(ROOT, '.tmp', '.selfhost-cache')
 
 const { loadForeign } = await import('../src/load.js')
 const { replayIntoPi } = await import('../src/replay-pi.js')

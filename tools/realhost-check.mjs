@@ -15,7 +15,7 @@ import fs from 'node:fs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
-process.env.DSH_PI_BRIDGE_HOME = path.join(ROOT, 'scripts', '.realhost-cache')
+process.env.DSH_PI_BRIDGE_HOME = path.join(ROOT, '.tmp', '.realhost-cache')
 
 /**
  * Candidate locations of an installed DSH build's tools package.

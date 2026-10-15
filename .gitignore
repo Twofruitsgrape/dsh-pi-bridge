@@ -1,11 +1,3 @@
 node_modules/
-scripts/.e2e-cache/
-scripts/.selfhost-cache/
-scripts/.dbg-cache/
-scripts/.entry-cache/
-scripts/.bridge-cache/
-scripts/.real-cache/
-scripts/.log/
-scripts/.*.log
-scripts/.jiti-driver.*
+.tmp/
 *.tgz

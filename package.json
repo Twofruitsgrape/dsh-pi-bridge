@@ -1,6 +1,6 @@
 {
   "name": "dsh-pi-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "One plugin, two hosts: installs into the pi coding agent and into DeepSeek Harness, and bridges the ecosystems. In DSH a pi_install tool turns pi packages into native DSH tools, commands and skills; in pi a /dsh-install command turns DSH plugin bundles into pi tools and commands. Same code, both entry conventions, published on npm so both plugin markets find it.",
   "main": "./index.js",
@@ -10,11 +10,12 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "test": "node scripts/selftest.mjs",
-    "test:entries": "node scripts/entry-check.mjs && node scripts/selfhost-check.mjs",
-    "test:host": "node scripts/realhost-check.mjs",
-    "test:all": "node scripts/selftest.mjs && node scripts/entry-check.mjs && node scripts/selfhost-check.mjs && node scripts/realhost-check.mjs && node scripts/e2e-preview.mjs && node scripts/edge-cases.mjs",
-    "e2e": "node scripts/e2e-preview.mjs && node scripts/edge-cases.mjs"
+    "test": "node scripts/run-all.mjs",
+    "test:offline": "node scripts/selftest.mjs",
+    "test:entries": "node scripts/entry-check.mjs",
+    "test:host": "node tools/realhost-check.mjs",
+    "test:network": "node tools/e2e-preview.mjs && node tools/edge-cases.mjs",
+    "test:all": "node scripts/run-all.mjs"
   },
   "keywords": [
     "dsh",
@@ -43,10 +44,17 @@
   },
   "files": [
     "index.js",
-    "src",
-    "extensions",
-    "skills",
-    "scripts",
+    "src/*.js",
+    "extensions/index.js",
+    "skills/dsh-pi-bridge/SKILL.md",
+    "scripts/selftest.mjs",
+    "scripts/entry-check.mjs",
+    "scripts/run-all.mjs",
+    "scripts/fixtures/**",
+    "tools/selfhost-check.mjs",
+    "tools/realhost-check.mjs",
+    "tools/e2e-preview.mjs",
+    "tools/edge-cases.mjs",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"

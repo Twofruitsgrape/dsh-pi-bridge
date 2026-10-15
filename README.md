@@ -127,10 +127,17 @@ captures but registers nothing.
 ## Develop
 
 ```bash
-npm test                # 34 offline checks: both directions, mock hosts, no network
-npm run test:entries    # loads both real entries and asserts the host-facing surface
-npm run test:all        # the above plus the real-package cases (needs network)
-npm run e2e             # just the published-package probes
+```bash
+npm test                # offline suites: 40 checks + both host entries + self-bridge
+npm run test:offline    # just the pipeline self-test
+npm run test:entries    # both real entries and the host-facing surface
+npm run test:host       # acceptance against an installed DSH build (see note)
+npm run test:network    # real published packages from npm and GitHub
+```
+
+`test:host` reads the installed host's own `@deepseek-ai/dsh-tools` from inside its asar, which only
+an Electron-patched fs can reach. Run it from a host process (or the harness); under plain Node it
+reports an explicit SKIP rather than pretending the host refused us.
 ```
 
 The self-test builds fixtures by hand — a TypeScript pi extension using the TypeBox builder, and a

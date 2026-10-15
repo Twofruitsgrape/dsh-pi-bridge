@@ -295,6 +295,22 @@ async function main () {
     } finally { globalThis.fetch = origFetch }
   }
 
+  console.log('caches stay outside the published tree')
+  {
+    // A 1.9 GB npm-install tree once landed under scripts/: files:["scripts"] would
+    // have shipped it. Published directories must never hold a bridge cache.
+    const { readdir } = await import('node:fs/promises')
+    const published = ['src', 'scripts', 'extensions', 'skills', 'tools']
+    const offenders = []
+    for (const dir of published) {
+      let names = []
+      try { names = await readdir(path.join(ROOT, dir)) } catch { continue }
+      for (const n of names) if (/^\.[\w-]*cache$/.test(n) || /\bcleanroom\b/.test(n) || n.endsWith('.log') || n.endsWith('.tgz')) offenders.push(dir + '/' + n)
+    }
+    check('no cache or scratch tree inside published dirs', offenders.length === 0, offenders.join(', '))
+    check('bridge cache root is outside published dirs', !String(process.env.DSH_PI_BRIDGE_HOME || '').includes(path.join(ROOT, 'scripts')), String(process.env.DSH_PI_BRIDGE_HOME))
+  }
+
   console.log('dual-host self detection')
   const self = await loadForeign(ROOT, { host: 'auto' })
   check('self detected for both hosts', !!(self.info.pi && self.info.dsh), JSON.stringify(self.info.signals))

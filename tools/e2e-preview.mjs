@@ -15,7 +15,7 @@ import path from 'node:path'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
-process.env.DSH_PI_BRIDGE_HOME = path.join(ROOT, 'scripts', '.e2e-cache')
+process.env.DSH_PI_BRIDGE_HOME = path.join(ROOT, '.tmp', '.e2e-cache')
 
 const { loadForeign } = await import('../src/load.js')
 const { replayIntoDsh } = await import('../src/replay-dsh.js')
