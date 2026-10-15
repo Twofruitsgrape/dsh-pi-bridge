@@ -295,6 +295,49 @@ async function main () {
     } finally { globalThis.fetch = origFetch }
   }
 
+  console.log('resolver handles every source type')
+  {
+    // An earlier edit deleted fromGit/fromUrl/fromLocal while removing dead code
+    // and nothing caught it: resolve() still referenced them, so every local
+    // install crashed at runtime. Each parseSpec type must have a working branch.
+    const { parseSpec } = await import('../src/resolve.js')
+    const types = ['npm', 'git', 'url', 'local']
+    const SPECIMENS = {
+      npm: ['npm:foo', 'npm'],
+      git: ['git:github.com/a/b', 'git'],
+      // A GitHub repository URL is a git source wearing a URL: normalizing it
+      // means the clone path handles it, so the expectation is git, not url.
+      url: ['https://github.com/a/b', 'git'],
+      'raw url': ['https://example.com/pkg.tgz', 'url'],
+      local: [piDir, 'local'],
+    }
+    for (const [label, [spec, want]] of Object.entries(SPECIMENS)) {
+      const parsed = parseSpec(spec)
+      check('parseSpec(' + label + ') -> ' + want, parsed.type === want, JSON.stringify(parsed))
+    }
+    // A local resolve must actually copy, not throw a missing-function error.
+    const local = await loadForeign(piDir, { host: 'pi' })
+    check('local source resolves through the same path as npm', !!local.info.name && local.errors.length === 0, JSON.stringify(local.errors).slice(0, 200))
+  }
+
+  console.log('no placeholder dependencies survive')
+  {
+    // Placeholders (0.0.0-bridge-missing) used to occupy a real dependency's
+    // directory: npm then saw the tree as installed and skipped it, so a working
+    // package died with "is not a function". installDependencies must purge them.
+    const { installDependencies } = await import('../src/resolve.js')
+    const box = path.join(HOME, 'fixtures', 'placeholder-check')
+    const nm = path.join(box, 'node_modules', 'left-pad')
+    await mkdir(nm, { recursive: true })
+    await writeFile(path.join(box, 'package.json'), JSON.stringify({ name: 'ph', version: '1.0.0', dependencies: { 'left-pad': '*' } }), 'utf8')
+    await writeFile(path.join(nm, 'package.json'), JSON.stringify({ name: 'left-pad', version: '0.0.0-bridge-missing', main: 'index.mjs' }), 'utf8')
+    await writeFile(path.join(nm, 'index.mjs'), 'export default {}\n', 'utf8')
+    await installDependencies(box, () => {})
+    let version = '(removed)'
+    try { version = JSON.parse(await readFile(path.join(nm, 'package.json'), 'utf8')).version } catch { /* gone */ }
+    check('placeholder version is purged before installing', version === '(removed)' || version === '0.0.0-bridge-missing' ? version !== '0.0.0-bridge-missing' : true, 'left-pad version now ' + version)
+  }
+
   console.log('caches stay outside the published tree')
   {
     // A 1.9 GB npm-install tree once landed under scripts/: files:["scripts"] would

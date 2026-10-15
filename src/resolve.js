@@ -101,25 +101,6 @@ async function fromNpm (id, dest, log) {
   const { extractTgz: extract } = await import('./tar.js')
   await extract(tgz, dest)
   await rm(tgz, { force: true })
-  await linkDependencies(dest, name)
-}
-
-/** npm dependencies inside a bridged package resolve against the real registry. */
-async function linkDependencies (dest, selfName) {
-  try {
-    const pkg = JSON.parse(await readFile(path.join(dest, 'package.json'), 'utf8'))
-    const deps = Object.keys(pkg.dependencies || {})
-    if (!deps.length) return
-    await mkdir(path.join(dest, 'node_modules'), { recursive: true })
-    for (const dep of deps) {
-      if (dep === selfName) continue
-      const target = path.join(dest, 'node_modules', ...dep.split('/'))
-      if (await pathExists(target)) continue
-      await mkdir(target, { recursive: true })
-      await writeFile(path.join(target, 'package.json'), JSON.stringify({ name: dep, version: '0.0.0-bridge-missing', type: 'module', main: './index.mjs' }, null, 2), 'utf8')
-      await writeFile(path.join(target, 'index.mjs'), 'export default {}\n', 'utf8')
-    }
-  } catch { /* best effort */ }
 }
 
 async function fromGit (source, dest, log) {
@@ -149,9 +130,8 @@ async function fromLocal (id, dest, log) {
   const src = path.resolve(id)
   log('local: ' + src)
   await readdir(src).catch(() => { throw new Error('not a directory: ' + src) })
-  // Self-bridging (a package whose cache sits inside it, as in the tests) must
-  // not recurse: node's cp rejects a destination inside its source up front,
-  // before any filter runs, so that case is copied by hand.
+  // cp rejects a destination inside its source before consulting any filter, so
+  // a self-bridged package (cache within the package) is copied by hand.
   if (isWithin(src, dest)) { await copyTree(src, dest, 0); return }
   await cp(src, dest, { recursive: true, filter: (t) => !isExcluded(String(t), src) })
 }
@@ -215,4 +195,71 @@ async function fetchBytes (url) {
   const res = await fetch(url)
   if (!res.ok) throw new Error('HTTP ' + res.status + ' for ' + url)
   return new Uint8Array(await res.arrayBuffer())
+}
+
+/**
+ * Install a package's own published dependencies into its directory.
+ *
+ * This is the difference between a bridged package that works and one that dies
+ * on its first call: a package imports real libraries (undici, typebox helpers,
+ * yaml), and if they are absent nothing the bridge registers can run. Both paths
+ * use it - the proxy before loading, and the replay mirror before capture - so
+ * the behaviour cannot drift between them.
+ *
+ * Status values are contractual: callers must surface 'failed' and 'partial'
+ * rather than continue and let a tool break silently.
+ *
+ * @param {string} dir package root (the cache copy, never the user's source)
+ * @param {(m:string)=>void} [log]
+ * @returns {Promise<{status:'none'|'installed'|'partial'|'failed', count?:number, reason?:string}>}
+ */
+export async function installDependencies (dir, log) {
+  const note = log || (() => {})
+  let pkg = null
+  try { pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) } catch { return { status: 'none' } }
+  const deps = Object.keys((pkg && pkg.dependencies) || {})
+  if (!deps.length) return { status: 'none' }
+
+  const nm = path.join(dir, 'node_modules')
+  await purgePlaceholders(nm, deps)
+  const present = await readdir(nm).then((e) => e.filter((n) => !n.startsWith('.') && !n.startsWith('_')).length).catch(() => 0)
+  if (present >= deps.length) return { status: 'installed', count: deps.length, reason: 'already present' }
+
+  const args = ['install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps']
+  note('npm install (' + deps.length + ' dependencies) in ' + path.basename(dir))
+  const code = await new Promise((done) => {
+    const isWin = process.platform === 'win32'
+    // npm is a .cmd shim on Windows: spawning it without a shell is EINVAL.
+    const child = spawn('npm', args, { cwd: dir, stdio: 'ignore', shell: isWin, windowsHide: true })
+    const timer = setTimeout(() => { try { child.kill() } catch { /* gone */ } }, 300000)
+    child.on('error', (e) => { clearTimeout(timer); done('spawn:' + (e && e.code)) })
+    child.on('close', (c) => { clearTimeout(timer); done(c) })
+  })
+
+  const after = await readdir(nm).then((e) => e.filter((n) => !n.startsWith('.') && !n.startsWith('_')).length).catch(() => 0)
+  if (code === 0) return { status: 'installed', count: deps.length, reason: after + ' dirs' }
+  if (after > 0) return { status: 'partial', count: deps.length, reason: 'npm exited ' + code + ', ' + after + ' dirs present' }
+  return { status: 'failed', count: deps.length, reason: 'npm exited ' + code }
+}
+
+/**
+ * Remove placeholder packages an earlier build wrote into node_modules.
+ *
+ * A placeholder holds the directory a real dependency needs: npm then sees the
+ * tree populated and skips installing, while the import resolves to an empty
+ * stub - which is how a working package failed with "is not a function". Only
+ * entries carrying our own marker version are touched.
+ */
+export async function purgePlaceholders (nm, deps) {
+  for (const dep of deps) {
+    const one = await import('node:fs/promises')
+    const manifest = path.join(nm, ...dep.split('/'), 'package.json')
+    try {
+      const raw = JSON.parse(await one.readFile(manifest, 'utf8'))
+      const v = String(raw.version || '')
+      if (v.includes('bridge-missing') || v.includes('dsh-pi-bridge')) {
+        await one.rm(path.join(nm, ...dep.split('/')), { recursive: true, force: true })
+      }
+    } catch { /* absent: nothing to purge */ }
+  }
 }

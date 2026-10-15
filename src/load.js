@@ -17,7 +17,7 @@ import { mkdir, writeFile, rm, cp, readdir, stat } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
-import { resolve as resolveSource, PACKAGES_DIR, CACHE_ROOT } from './resolve.js'
+import { resolve as resolveSource, installDependencies, PACKAGES_DIR, CACHE_ROOT } from './resolve.js'
 import { classify, piEntries, walk, dshEntry } from './manifest.js'
 import { scanImports, makeStubs, splitSpecifier, toFileUrl } from './stubs.js'
 import { emitBuild, stripAvailable } from './transpile.js'
@@ -103,7 +103,12 @@ export async function loadForeign (spec, options) {
     await cp(resolved.dir, mirror, { recursive: true, filter: (source) => keepCopy(source, resolved.dir) })
   }
 
-  if (options && options.installDeps) await installRealDeps(mirror, log)
+  // A bridged package that cannot reach its own published dependencies is not
+  // usable: its first real call dies on an inert stub. Installing them is the
+  // default; installDeps: false is an explicit offline escape hatch.
+  const deps = (options && options.installDeps === false)
+    ? { status: 'skipped', reason: 'installDeps:false' }
+    : await installDependencies(mirror, log)
 
   const allFiles = await walk(mirror, 7)
   const sources = allFiles.filter(f => /\.(ts|mts|js|mjs|cjs)$/.test(f))
@@ -140,6 +145,11 @@ export async function loadForeign (spec, options) {
   }
 
   if (compileFailures.length) captured.errors = (captured.errors || []).concat(compileFailures.map(f => 'uncompiled ' + f))
+  captured.dependencies = deps
+  if (deps.status === 'failed' || deps.status === 'partial') {
+    captured.degraded = 'dependencies ' + deps.status + ' (' + deps.count + ' declared): ' + deps.reason
+      + ' - tools that import them will fail at call time'
+  }
   captured.info = info
   captured.host = host
   captured.mirror = mirror
@@ -189,30 +199,6 @@ async function compileTypeScript (mirror, sources, log) {
   const { emitted, failures } = await emitBuild(mirror, mirror, ts)
   if (failures.length) log('TypeScript: ' + failures.length + ' file(s) could not be compiled')
   return { emitted, failures }
-}
-
-/** Best effort: install the package's own published dependencies. */
-async function installRealDeps (mirror, log) {
-  let pkg = {}
-  try { pkg = JSON.parse(await readFileSafe(path.join(mirror, 'package.json'))) } catch { return }
-  const deps = Object.keys(pkg.dependencies || {})
-  if (!deps.length) return
-  const hasReal = await readdir(path.join(mirror, 'node_modules')).then(e => e.length > 0).catch(() => false)
-  if (hasReal) return
-  const args = ['install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps']
-  log('npm install (' + deps.length + ' dependencies)')
-  await new Promise((done) => {
-    const isWin = process.platform === 'win32'
-    // Windows needs a shell to run the .cmd shim; spawning npm.cmd directly is EINVAL.
-    const child = spawn(isWin ? 'npm' : 'npm', args, { cwd: mirror, stdio: 'ignore', shell: isWin })
-    const timer = setTimeout(() => { try { child.kill() } catch { /* gone */ } }, 180000)
-    child.on('error', () => { clearTimeout(timer); log('npm unavailable; dependencies left as stubs'); done() })
-    child.on('close', (code) => { clearTimeout(timer); if (code !== 0) log('npm install failed; dependencies left as stubs'); done() })
-  })
-}
-
-async function readFileSafe (p) {
-  try { return await (await import('node:fs/promises')).readFile(p, 'utf8') } catch { return '{}' }
 }
 
 function configFor (pkg) {
