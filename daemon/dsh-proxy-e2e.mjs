@@ -121,8 +121,18 @@ const list = registered.find(t => t.name === "bridge_list")
 const ls = await list.execute({}, {})
 check("bridge_list records proxy mode", /mode=proxy/.test(String(ls.result)), String(ls.result).slice(0, 240))
 
+// A daemon outlives one DSH call, so a second install of the same package loads
+// nothing new. Reporting only the delta made an idempotent reinstall claim the
+// package had no capabilities, and the model then could not find the tool it was
+// told to call. The report must be identical to the first one.
 const again = await install.execute({ source: pkg.replace(/\\/g, "/") }, {})
 check("reinstall still reports success", again.ok === true, String(again.result).slice(0, 200))
+const firstTools = (String(out.result).match(/tools: ([^\n]+)/) || [])[1] || ""
+const secondTools = (String(again.result).match(/tools: ([^\n]+)/) || [])[1] || ""
+check("reinstall reports the same callable tools", firstTools.length > 0 && secondTools === firstTools, "first=[" + firstTools + "] second=[" + secondTools + "]")
+check("reinstall does not claim nothing arrived", !/nothing callable arrived/.test(String(again.result)), String(again.result).replace(/\s+/g, " ").slice(0, 220))
+const rereg = registered.filter(t2 => t2.name.endsWith("_fixture_tool")).length
+check("reinstall does not double-register", rereg === 1, "copies registered: " + rereg)
 
 const remove = registered.find(t => t.name === "bridge_remove")
 const rm1 = await remove.execute({ source: "npm:definitely-not-real-xyz" }, {})

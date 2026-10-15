@@ -236,13 +236,18 @@ function startServer (pi) {
         if (url === '/load') {
           const { root } = JSON.parse(raw || '{}')
           if (!root) return json(res, 200, { ok: false, error: 'no package root given' })
-          const before = new Set(recorded.keys())
+          const owner = path.basename(String(root).replace(/[\\/]+$/, ''))
           await loadPackage(root, pi)
-          const added = [...recorded.keys()].filter(n => !before.has(n))
+          // Report every tool this package owns, not just the ones that appeared:
+          // the daemon outlives a single DSH call, so a package loaded by an
+          // earlier preview or install contributes nothing new yet is still
+          // perfectly callable. Reporting only the delta made an idempotent
+          // reinstall look like a package with no capabilities.
+          const owned = [...recorded.entries()].filter(([, e]) => e.origin === owner)
           return json(res, 200, {
             ok: true,
-            added: added.map(n => describe(n, recorded.get(n))),
-            commands: [...recordedCommands.entries()].filter(([n]) => n).map(([n, c]) => ({ name: n, origin: c.origin, description: c.description })),
+            added: owned.map(([n, e]) => describe(n, e)),
+            commands: [...recordedCommands.entries()].filter(([, c]) => c.origin === owner).map(([n, c]) => ({ name: n, origin: c.origin, description: c.description })),
             errors: loadErrors.slice(-4),
             notes: notes.slice(-4),
           })

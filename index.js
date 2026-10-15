@@ -150,9 +150,13 @@ export async function apply (ctx, config) {
    * are the package's own schema; a call goes to pi and pi's native result comes
    * back, so what the model sees is pi's behaviour rather than a translation.
    */
+  /** Names this process registered, so a reinstall is a no-op rather than a clash. */
+  const shellNames = new Set()
   function registerShells (prefix, tools, report) {
     for (const t of tools || []) {
       const name = prefix + '_' + t.name
+      if (shellNames.has(name)) { report.tools.push(name); continue }
+      shellNames.add(name)
       if (!ctx.tools || typeof ctx.tools.register !== 'function') { report.skipped.push('tools service missing; ' + name); continue }
       try {
         ctx.tools.register(tool({
