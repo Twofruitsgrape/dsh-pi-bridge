@@ -15,7 +15,9 @@
     "test:proxy": "node daemon/acceptance.mjs && node daemon/dsh-proxy-e2e.mjs && node daemon/dsh-host-e2e.mjs && node daemon/proxy-e2e.mjs",
     "test:host": "node tools/realhost-check.mjs",
     "test:network": "node tools/e2e-preview.mjs && node tools/edge-cases.mjs",
-    "e2e": "node tools/e2e-preview.mjs && node tools/edge-cases.mjs"
+    "e2e": "node tools/e2e-preview.mjs && node tools/edge-cases.mjs",
+    "test:live": "node daemon/acceptance.mjs --live",
+    "test:dsh-live": "node daemon/dsh-real-host.mjs"
   },
   "keywords": [
     "dsh",
@@ -63,7 +65,8 @@
     "daemon/dsh-host-e2e.mjs",
     "daemon/acceptance.mjs",
     "daemon/dsh-proxy-e2e.mjs",
-    "daemon/proxy-e2e.mjs"
+    "daemon/proxy-e2e.mjs",
+    "daemon/dsh-real-host.mjs"
   ],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

@@ -1,0 +1,202 @@
+
+> dsh-pi-bridge@0.2.0 test
+> node scripts/run-all.mjs
+
+schema bridge
+  ok   json schema -> spec map
+  ok   spec map -> json schema
+pi package -> DSH host
+(node:43164) ExperimentalWarning: stripTypeScriptTypes is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok   classified as pi package
+  ok   TypeScript compiled
+  ok   extension loaded
+  ok   tool captured
+  ok   no duplicate registrations
+  ok   command captured
+  ok   skill dir found
+  ok   replayed tool
+  ok   replayed command
+  ok   replayed skill provider
+  ok   event mapped to agent/created
+  ok   nothing skipped
+  ok   bridged tool parameter is described
+  ok   bridged tool executes with DSH result shape
+  ok   bridged tool declares output schema
+  ok   skill provider lists SKILL.md
+  ok   skill content loads
+DSH bundle -> pi host
+  ok   classified as DSH bundle
+  ok   bundle entry loaded
+  ok   tool captured through defineTool
+  ok   command captured
+  ok   async skill provider captured
+  ok   replayed to pi tool
+  ok   replayed to pi command
+  ok   skills contributed via resources_discover
+  ok   bridged skill path is contributed
+  ok   pi tool params are JSON Schema
+  ok   pi tool returns pi content shape
+inert stub robustness (real plugin shapes)
+  ok   a class can extend an inert binding
+  ok   inert renders a named label
+  ok   inert is callable and chainable
+bridges survive a host restart
+  ok   restart replays recorded pi tools
+  ok   a broken record does not block the rest
+restore never reaches the network
+  ok   restore issues no network request
+  ok   uncached bridge is reported as failed
+resolver handles every source type
+  ok   parseSpec(npm) -> npm
+  ok   parseSpec(git) -> git
+  ok   parseSpec(url) -> git
+  ok   parseSpec(raw url) -> url
+  ok   parseSpec(local) -> local
+  ok   local source resolves through the same path as npm
+no placeholder dependencies survive
+(node:43164) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+  ok   placeholder version is purged before installing
+tool definitions satisfy the host schema rules
+  ok   output schema carries no per-property required
+  ok   output schema is object-rooted
+  ok   output render is supplied
+  ok   tools are defined through a spec-map helper
+  ok   no bare host import that a linked bundle cannot resolve
+daemon launches correctly from either runtime
+  ok   plain node: no ELECTRON_RUN_AS_NODE
+  ok   plain node: runs the daemon runner
+  ok   inside Electron: asks the binary to act as node
+  ok   win32 host: PATH gains the npm global bin holding pi
+  ok   win32 host: existing PATH entries are kept
+  ok   win32 host: no pi means no PATH change
+  ok   proxy module exports ensureDaemon
+every runtime file is published
+  ok   files covers all 28 referenced modules
+  ok   every referenced module exists on disk
+  ok   proxy resolves the runner through the package root
+the first recorded bridge is attempted on restore
+  ok   restore flag starts untried
+  ok   inspection is not conflated with failure
+  ok   a success marks the daemon usable
+  ok   a failure stops further waits
+  ok   restore has a bounded wait
+no percent-encoded path derivation
+  ok   no shipped module derives a path from URL.pathname
+  ok   fileURLToPath is imported where used
+caches stay outside the published tree
+  ok   no cache or scratch tree inside published dirs
+  ok   bridge cache root is outside published dirs
+dual-host self detection
+  ok   self detected for both hosts
+
+all 69 checks passed
+offline pipeline: PASS
+  ok   exports name
+  ok   exports inject
+  ok   exports apply
+  ok   default export object
+  ok   DSH tool registered: pi_install
+  ok   DSH tool registered: pi_preview
+  ok   DSH tool registered: dsh_install
+  ok   DSH tool registered: bridge_list
+  ok   DSH tool registered: bridge_remove
+  ok   tools carry output schema
+  ok   self skill mounted through inject
+  ok   missing argument is guarded
+  ok   pi entry default factory
+  ok   pi factory is async (restore runs at load)
+  ok   pi command registered: /dsh-install
+  ok   pi command registered: /dsh-preview
+  ok   pi command registered: /bridge-list
+  ok   pi command registered: /bridge-remove
+  ok   pi tools registered
+  ok   pi tool params are JSON Schema
+  ok   pi tool reports failure as content, not throw
+
+ENTRY CHECK PASSED
+host entries: PASS
+(node:44624) ExperimentalWarning: stripTypeScriptTypes is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+detected   = {"pi":["keyword:pi-package","manifest:pi","layout:extensions|skills"],"dsh":["keyword:dsh-plugin","manifest:dsh.bundle","layout:main"]}
+stubs      = ["@deepseek-ai/dsh-tools","files","typebox","@deepseek-ai/dsh-llm"]
+errors     = []
+caps       = ["tool:pi_install","tool:pi_preview","tool:dsh_install","tool:bridge_list","tool:bridge_remove","tool:bridge_status","skill:dsh-pi-bridge"]
+skillDirs  = ["dsh-pi-bridge"]
+replay     = {"tools":["self_pi_install","self_pi_preview","self_dsh_install","self_bridge_list","self_bridge_remove","self_bridge_status"],"commands":[],"skills":["E:\\Projects\\testanything\\dsh插件安装\\dsh-pi-bridge\\.tmp\\.selfhost-cache\\build\\dsh-pi-bridge@0.2.0-dsh-mva7ops9\\skills\\dsh-pi-bridge"],"events":[],"skipped":[]}
+ALL 5 DSH TOOLS CROSSED INTO PI
+  self_pi_install -> ok: dsh-pi-bridge: empty source: give npm:<pkg>[@ver], git:githu
+  self_pi_preview -> ok: dsh-pi-bridge: empty source: give npm:<pkg>[@ver], git:githu
+  self_dsh_install -> ok: dsh-pi-bridge: empty source: give npm:<pkg>[@ver], git:githu
+  self_bridge_list -> ok: no bridged packages yet
+  self_bridge_remove -> ok: not bridged: undefined
+  self_bridge_status -> ok: { "daemon": { "ok": true, "ctxCaptured": true, "toolsInPi": 
+self-bridge: PASS
+  ok   classifies @deepseek-ai/* as host
+  ok   classifies cordis as host
+  ok   classifies @deepseek-ai/schemastery as host
+  ok   leaves a third-party package alone
+  ok   leaves node: alone
+  ok   leaves relative alone
+  ok   rewrote the resolvable host import
+  ok   reported what it mapped
+  ok   left the unresolvable host import alone
+  ok   kept the relative specifier
+  ok   kept the node: specifier
+  ok   kept the third-party specifier
+  ok   rewrote the dynamic import as well
+  ok   derives two roots from execPath
+
+LOADER UNIT PASSED
+loader rules: PASS
+  ok   daemon + pi RPC child + bootstrap came up
+  ok   bridge loaded the fixture package
+  ok   tool is live inside real pi, not a stub
+  ok   parameter schema crossed intact
+  ok   tool executed and returned the package result
+  ok   unknown tool is refused, not guessed
+  ok   a new package loads into the running pi
+  ok   dynamically loaded tool executes
+
+DAEMON ACCEPTANCE PASSED
+pi proxy: PASS
+  ok   DSH entry registered its own tools
+(node:44188) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+  pi_install said: bridged E:/Projects/testanything/dsh插件安装/dsh-pi-bridge/.tmp/dsh-proxy-e2e/fixture-pi-package as fixture-pi-package@1.0.0 mode: package code runs natively inside a supervised pi process tools: fixture_pi_package_fixture_tool skills mounted: fixture-skill pi slash commands registered in pi: /fixture-c
+  ok   pi_install succeeded
+  ok   a DSH forwarding tool was registered
+  ok   parameter schema crossed from pi
+  ok   forwarding tool returned the result pi computed
+  ok   description marks it as running inside pi
+  ok   package skill mounted into DSH as data
+  ok   pi-side command is reported
+  ok   bridge_status reports a live daemon
+  ok   bridge_list records proxy mode
+  ok   reinstall still reports success
+  ok   reinstall reports the same callable tools
+  ok   reinstall does not claim nothing arrived
+  ok   reinstall does not double-register
+  ok   removing an unknown source says so
+
+DSH PROXY E2E PASSED
+dsh proxy (DSH side): PASS
+dsh-pi-bridge restore skipped: npm:some-dsh-plugin: not in bridge cache
+  ok   pi half exposes dsh_install
+  ok   install reported the host path
+  ok   install said which tool arrived
+  ok   a forwarding tool was registered in pi
+  ok   DSH spec map became a pi JSON Schema
+  ok   tool name and schema agree
+  ok   calling it reached DSH and unwrapped the result
+  ok   details mark it as via-DSH
+  ok   the host was asked for exactly that tool
+  ok   reinstall does not double-register
+  ok   a successful call stays successful
+  ok   unreachable DSH does not crash pi
+  ok   unreachable DSH is reported as a failure
+
+DSH HOST E2E PASSED
+dsh host forwarding (pi side): PASS
+all suites passed
+CODE=0

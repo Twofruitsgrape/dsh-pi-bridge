@@ -70,7 +70,11 @@ export function rewriteHostSpecifiers (source, resolveSpec = hostEntry) {
  * Load one bundle directory against a live DSH scope.
  * @param {string} dir bundle root
  * @param {any} ctx the scope this plugin was applied with
- * @param {{genDir:string, log?:(m:string)=>void, entry?:(dir:string,pkg:any)=>Promise<string|null>}} opts
+ * @param {{genDir:string, log?:(m:string)=>void, entry?:(dir:string,pkg:any)=>Promise<string|null>, registered?:Set<string>}} opts
+ *        registered: tool names this session already has. The host rejects a
+ *        duplicate ("tool X is already registered", measured on a live boot), and
+ *        a second request for a bundle the user already installed is the normal
+ *        case, not an error: pi asking to use what DSH already loaded.
  * @returns {Promise<{name:string, tools:any[], commands:any[], mapped:any[], error?:string}>}
  */
 export async function loadDshBundle (dir, ctx, opts) {
@@ -82,11 +86,14 @@ export async function loadDshBundle (dir, ctx, opts) {
 
   const tools = []
   const commands = []
+  /** Names the host refused because they already exist; reported, not fatal. */
+  const alreadyPresent = []
   /** Callable tool definitions this load registered, keyed by name. */
   const callable = new Map()
+  const registered = (opts && opts.registered) || new Set()
   // Recording wrappers so the caller learns what the bundle registered, while
   // the registrations themselves go to the real host.
-  const scope = observeScope(ctx, tools, commands)
+  const scope = observeScope(ctx, tools, commands, registered, alreadyPresent)
   let target = entryFile
   try {
     const source = readFileSync(entryFile, 'utf8')
@@ -105,10 +112,15 @@ export async function loadDshBundle (dir, ctx, opts) {
     }
     await apply(scope, (mod.default && mod.default.config) || {})
     for (const t of tools) callable.set(t.name, t.def)
+    // A reused tool is still callable: its definition came from the first load,
+    // which is why the caller keeps one shared registry rather than this map.
     return {
       name: info.name,
       // Strip the definition before returning it across a boundary.
-      tools: tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })),
+      tools: tools
+        .filter((t) => !alreadyPresent.includes(t.name))
+        .map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })),
+      reused: [...alreadyPresent],
       commands,
       mapped: [],
       callable,
@@ -128,7 +140,7 @@ export async function loadDshBundle (dir, ctx, opts) {
  * bundle registers for real and the host accepts it exactly as it accepts a
  * boot-time plugin.
  */
-function observeScope (ctx, tools, commands) {
+function observeScope (ctx, tools, commands, registered, alreadyPresent) {
   const recording = (kind, sink) => {
     const real = ctx[kind]
     return new Proxy(real, {
@@ -136,7 +148,10 @@ function observeScope (ctx, tools, commands) {
         if (prop === 'register') {
           return (def) => {
             const name = String((def && def.name) || 'unnamed')
-            if (kind === 'tools') sink.push({ name, description: String((def && def.description) || ''), parameters: (def && def.parameters) || null, def })
+            if (kind === 'tools') {
+              if (registered.has(name)) { alreadyPresent.push(name); return { dispose () {} } }
+              sink.push({ name, description: String((def && def.description) || ''), parameters: (def && def.parameters) || null, def })
+            }
             else sink.push({ name, description: String((def && def.description) || '') })
             return target.register(def)
           }

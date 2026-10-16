@@ -30,10 +30,18 @@ async function readState() {
   }
 }
 
-async function writeState(state) {
+async function writeState(state, opts) {
   const { mkdir, writeFile } = await import("node:fs/promises");
   await mkdir(CACHE_ROOT, { recursive: true });
-  await writeFile(REGISTRY, JSON.stringify(state, null, 2), "utf8");
+  // Merge over the newest copy on disk: DSH may have recorded an entry while
+  // this write was being prepared, and overwriting the file would erase it.
+  // Removed keys are passed in, since a merge alone would resurrect them.
+  let merged = { bridges: {} }
+  try { merged = JSON.parse(await readFile(REGISTRY, "utf8")) } catch { /* first write */ }
+  merged.bridges = merged.bridges || {}
+  for (const [k, v] of Object.entries(state.bridges || {})) merged.bridges[k] = v
+  for (const k of (opts && opts.removed) || []) delete merged.bridges[k]
+  await writeFile(REGISTRY, JSON.stringify(merged, null, 2), "utf8");
 }
 
 function shortPrefix(name) {
@@ -48,7 +56,7 @@ function shortPrefix(name) {
   return s || "bridged";
 }
 
-function formatReport(spec, captured, report) {
+function formatReport(spec, captured, report, mode) {
   const lines = ["bridged " + spec + " as " + captured.info.name + "@" + captured.info.version];
   lines.push("  tools: " + (report.tools.length ? report.tools.join(", ") : "none"));
   lines.push("  commands: " + (report.commands.length ? report.commands.map((c) => "/" + c).join(", ") : "none"));
@@ -56,7 +64,19 @@ function formatReport(spec, captured, report) {
   if (report.events.length) lines.push("  events: " + report.events.join(", "));
   if (report.skipped.length) lines.push("  skipped: " + report.skipped.join("; "));
   if (captured.errors && captured.errors.length) lines.push("  load errors: " + captured.errors.join("; "));
-  lines.push("  bridged tools are callable in this session immediately.");
+  if (mode === "replay") {
+    // The translation path is a degraded mode, and saying "callable immediately"
+    // over it is a lie we measured: a real pi run reached it with no DSH session
+    // reachable and still reported success. Names arrive, but anything the bundle
+    // does with DSH's own services runs against bridge stand-ins.
+    lines.push("  mode: registrations replayed in pi, because no live DSH session was reachable");
+    lines.push("  NOTE: calls that need DSH services (ctx.llm, other bundles, the skill");
+    lines.push("        registry) run against stand-ins and may fail when used. Start");
+    lines.push("        DSH with DSH_PI_BRIDGE_DSH_SERVE=<port> and set");
+    lines.push("        DSH_PI_BRIDGE_DSH_ENDPOINT=<host>:<port> here for real forwarding.");
+  } else {
+    lines.push("  bridged tools are callable in this session immediately.");
+  }
   return lines.join("\n");
 }
 
@@ -104,7 +124,12 @@ export default async function (pi) {
     const report = { tools: [], commands: [], skills: [], events: [], skipped: [] };
     for (const t of loaded.tools || []) {
       const name = prefix + "_" + t.name;
-      if (registeredTools.has(name)) continue;
+      // Already registered in this process (by an earlier install, or by the
+      // restore that runs when the extension loads): still perfectly callable, so
+      // it belongs in the report. Reporting nothing here made a reinstall claim
+      // the package had no capabilities - the same defect the DSH half had, where
+      // pi_preview listed five tools and pi_install seconds later listed none.
+      if (registeredTools.has(name)) { report.tools.push(name); continue; }
       try {
         pi.registerTool({
           name,
@@ -159,10 +184,11 @@ export default async function (pi) {
       prefix,
       mirror: captured.mirror,
       report,
+      mode: "replay",
       at: new Date().toISOString(),
     };
     await writeState(state);
-    return formatReport(spec, captured, report);
+    return formatReport(spec, captured, report, "replay");
   }
 
   function firstArg(args) {
@@ -219,7 +245,7 @@ export default async function (pi) {
       }
       const entry = state.bridges[spec];
       delete state.bridges[spec];
-      await writeState(state);
+      await writeState(state, { removed: [params.source] });
       const { rm } = await import("node:fs/promises");
       if (entry.mirror) await rm(entry.mirror, { recursive: true, force: true });
       notify(ctx, "removed " + spec + " (tools registered earlier stay until pi restarts)", "info");
@@ -250,9 +276,30 @@ export default async function (pi) {
     },
   });
 
-  // Replay recorded DSH bundles so /dsh-install survives a pi restart.
+  // Restore recorded DSH bundles so /dsh-install survives a pi restart. Routing
+  // matters: a bundle that was loaded *inside a live DSH session* has to come
+  // back the same way. Replaying it through the translation path instead would
+  // hand the user stubbed look-alikes of tools that really work - a silent
+  // downgrade measured on a real run, where a pi session restored tools that had
+  // never been installed in pi at all. With no DSH session reachable, say so and
+  // register nothing rather than substituting stubs for working tools.
   const state = await readState();
-  const restore = await restoreIntoPi(pi, state, { log: (m) => console.log(m) });
+  const replayState = { bridges: {} }
+  const forwardSpecs = []
+  const serving = await liveDshAvailable()
+  for (const [spec, entry] of Object.entries(state.bridges || {})) {
+    if (entry && entry.host === "dsh" && entry.mode === "dsh-host") {
+      if (serving) forwardSpecs.push(spec)
+      else console.log("dsh-pi-bridge: " + spec + " runs inside DSH and no DSH session is serving; not replaying it as stubs")
+      continue
+    }
+    replayState.bridges[spec] = entry
+  }
+  for (const spec of forwardSpecs) {
+    try { await installDshViaHost(spec, { prefix: (state.bridges[spec] || {}).prefix }) }
+    catch (err) { console.log("dsh-pi-bridge restore failed " + spec + ": " + message(err)) }
+  }
+  const restore = await restoreIntoPi(pi, replayState, { log: (m) => console.log(m) });
   if (restore.failed.length) console.log("dsh-pi-bridge restore skipped: " + restore.failed.join("; "));
 
   pi.registerTool({

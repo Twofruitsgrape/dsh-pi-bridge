@@ -1,178 +1,224 @@
 # dsh-pi-bridge
 
-**One plugin, two hosts — and each host can install the other’s plugins.**
+One plugin, two hosts. Install it in pi and it lets pi use DeepSeek Harness
+plugins; install it in DSH and it lets DSH use pi plugins. Neither side
+translates the other's code in order to run it: a plugin keeps executing inside
+its own host, where that host's APIs are real, and the other side calls it.
 
-Install it into [pi](https://pi.dev) (`pi install npm:dsh-pi-bridge`) or into
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh plugin add dsh-pi-bridge`),
-and you get the same behaviour either way, plus a bridge that loads packages from *the other
-ecosystem* as native tools, slash commands and skills.
-
-一份代码，两个宿主：装到 pi 或装到 DSH —— 装完之后，两边的插件可以互相安装。
-DSH 里用 `pi_install` 装 pi 的插件，pi 里用 `/dsh-install` 装 DSH 的插件，转成本地宿主的
-工具 / 斜杠命令 / 技能。
-
-## Install
-
-```bash
-# pi coding agent
+```text
+# pi
 pi install npm:dsh-pi-bridge            # or: pi install git:github.com/Twofruitsgrape/dsh-pi-bridge
 
-# DeepSeek Harness
-dsh plugin add dsh-pi-bridge            # or install from the plugin panel: github:Twofruitsgrape/dsh-pi-bridge
+# DSH
+dsh plugin --profile <name> install github:Twofruitsgrape/dsh-pi-bridge
 ```
 
-Restart the host afterwards. Both keywords (`pi-package`, `dsh-plugin`) are declared, so the
-package is discoverable in each ecosystem’s own market.
+Restart the host afterwards. Both keywords (`pi-package` and `dsh-plugin`) are
+declared, so each ecosystem's own market can find the package.
 
 ## What you get in each host
 
 | | pi | DSH |
 |---|---|---|
-| Install from the other side | `/dsh-install <source>`, tools `dsh_install` / `dsh_preview` | tools `pi_install` / `pi_preview` / `dsh_install` |
-| Manage bridges | `/bridge-list`, `/bridge-remove` | tools `bridge_list` / `bridge_remove` |
-| Skill | `skills/dsh-pi-bridge/SKILL.md` | same `SKILL.md`, mounted through the skill registry |
+| Use a plugin from the other side | `dsh_install`, `dsh_preview`, `/dsh-install`, `/dsh-preview` | `pi_install`, `pi_preview` |
+| Manage what is bridged | `/bridge-list`, `/bridge-remove` | `bridge_list`, `bridge_remove`, `bridge_status` |
+| Skill | `skills/dsh-pi-bridge/SKILL.md` | the same `SKILL.md`, mounted through the skill registry |
 
-Sources use one grammar on both sides: `npm:<pkg>[@ver]`, `git:github.com/<owner>/<repo>[@ref]`,
-`github:<owner>/<repo>`, a repository URL, or a local path — exactly what each host already accepts.
+Sources use one grammar on both sides: `npm:<pkg>[@ver]`,
+`git:github.com/<owner>/<repo>[@ref]`, `github:<owner>/<repo>`, a repository URL,
+or a local path - exactly what each host already accepts.
+
+A real session, verbatim: a real DSH boot with a real model, installing a real
+published pi package.
 
 ```text
-dsh> pi_preview({ source: "npm:pi-subagents" })
-   package: pi-subagents@0.78.0
-   detected: {"pi":["keyword:pi-package","manifest:pi","layout:extensions|skills"]}
-     [tool] task     Run a supervised subagent task
-     [tool] taskstop Stop a running subagent
-     [command] /tasks Show running subagent tasks
-     [unsupported] TUI renderer (host-specific)
+dsh> pi_install({ source: "npm:pi-web-access", prefix: "web" })
+  bridged npm:pi-web-access as pi-web-access@0.41.0
+    mode: package code runs natively inside a supervised pi process
+    tools: web_web_search, web_source_check, web_fetch_content,
+           web_get_search_content, web_web_enable
+    pi slash commands registered in pi: /websearch, /curator, /google-account, /search
 
-dsh> pi_install({ source: "npm:pi-subagents" })
-   bridged npm:pi-subagents as pi-subagents@0.78.0
-     tools: pisubagents_task, pisubagents_taskstop
-     commands: /pisubagents_tasks
-     skipped: event has no DSH equivalent: cache_warming_decision
+dsh> web_web_search({ query: "DeepSeek V4" })   # a tool from the pi package
+  -> live results, fetched by the package itself using pi's own provider config
 ```
 
 ## How it works
 
-```text
-resolve      npm registry tarball / shallow git clone / local copy -> ~/.dsh-pi-bridge cache
-mirror       a private build tree, so a bridged package never imports a real host
-stub         every foreign host import becomes an inert stand-in, or a real bridge shim
-compile      TypeScript -> ESM with node:module stripTypeScriptTypes (no toolchain, no download)
-capture      load the package against a recording host API and collect what it registers
-replay       install those registrations onto the local host, converting schema both ways
+### pi plugins inside DSH: a supervised pi process
+
+`pi_install` materialises the package into the bridge cache, installs its real
+dependencies, and loads it inside a pi process the bridge supervises
+(`pi --mode rpc`). Every registration pi reports back becomes a DSH tool that
+forwards the call and returns what pi computed. `SKILL.md` directories mount as
+data through `ctx.skills`. The package sees pi's real `registerTool`,
+`registerProvider`, model registry and provider credentials, so a package that
+calls out to the network or to a model behaves exactly as it does for a pi user.
+
+This replaced an earlier design that replayed registrations onto DSH against
+stubbed imports. That version passed every mock test and failed against real
+packages, because a stubbed dependency is a tool that cannot run. Forwarding
+into the native host is the only version that can be honest about results.
+
+### DSH plugins inside pi: the live DSH session
+
+A DSH bundle needs `ctx.tools`, `ctx.llm` and the skill registry to be the real
+things, so `dsh_install` asks the live DSH session to load the bundle itself.
+The obstacle is that a bundle installed by the plugin manager is a symlink under
+a profile's `node_modules` and cannot resolve bare `@deepseek-ai/*` - measured as
+`MODULE_NOT_FOUND`. `src/dsh-loader.js` rewrites exactly those specifiers to the
+running build's own modules (the genuine packages, not stubs) and leaves
+relative, `node:` and third-party imports alone. The bundle registers with the
+host, and pi receives one forwarding tool per capability.
+
+The endpoint is off unless asked for, so an ordinary DSH start opens no port:
+
+```bash
+DSH_PI_BRIDGE_DSH_SERVE=43191 dsh ...                    # DSH side
+DSH_PI_BRIDGE_DSH_ENDPOINT=127.0.0.1:43191 pi ...        # pi side
 ```
 
-A DSH tool declaration carries a property spec map (`{ text: { type: ‘string’, required: true } }`)
-that `@deepseek-ai/dsh-tools` compiles to JSON Schema; a pi tool carries the JSON Schema directly
-(TypeBox). `src/schema.js` converts both directions, so a bridged tool’s parameters validate in the
-host that receives it. Result shapes are projected the same way: pi’s
-`{ content: [{ type: ‘text’ }] }` to DSH’s `{ ok, result }` and back.
+It binds 127.0.0.1 only and the client refuses a non-loopback endpoint. With no
+live DSH reachable, `dsh_install` says so and falls back to translation rather
+than pretending it forwarded.
 
-Skills need no conversion at all — both hosts implement the
-[Agent Skills specification](https://agentskills.io/specification), so a `SKILL.md` directory simply
-travels. DSH providers are read asynchronously (`list()` is a promise), and the bridge awaits them
-before replay, which is how a bundle like `dsh-comsol` crosses into pi intact.
+### When neither host is reachable
 
-## Verified against real published packages
+The bridge still resolves, compiles TypeScript (`node:module`
+`stripTypeScriptTypes`, no toolchain download) and captures what a package
+registers, so `preview` works anywhere. Registration replay onto the other host
+remains for same-host cases and for bundles whose whole payload is data - a DSH
+bundle that is only a skill directory has nothing to call remotely, and the skill
+simply travels. Both hosts implement the
+[Agent Skills specification](https://agentskills.io/specification).
 
-Measured with `npm run test:all` (offline suites plus the network cases), on the
-packages each ecosystem actually ships:
+### Parameter and result shapes
 
-| Bridged package | Direction | Arrived | Reported as not crossing |
-|---|---|---|---|
-| `pi-web-access@0.40.0` | pi → DSH | 4 tools, 4 commands, 6 event hooks | `registerShortcut`, 4 unmapped events |
-| `pi-subagents@0.78.0` | pi → DSH | 3 tools, 19 commands, 4 skill dirs | 33 items listed in the report |
-| `@plannotator/pi-extension@0.28.20` | pi → DSH | 216 TS files compiled, 1 skill dir | renderer registrations |
-| `dsh-comsol@1.1.1` (git) | DSH → pi / DSH | its `comsol-dsh` skill | — |
-| `dsh-cost-meter@1.8.26` | DSH → pi | nothing | correctly reports zero registrations |
+A DSH tool carries a property spec map
+(`{ text: { type: "string", required: true } }`) that `@deepseek-ai/dsh-tools`
+compiles to JSON Schema; a pi tool carries JSON Schema directly (TypeBox).
+`src/schema.js` converts both ways, and results are projected the same way: pi's
+`{ content: [{ type: "text" }] }` to DSH's `{ ok, result }` and back. The host
+validates schemas at registration time and accepts a narrower subset than draft
+JSON Schema - a `required` marker on a property node, or an object-level
+`required` array in an output schema, stops the whole plugin from activating.
+Those rules came from probing an installed host, and the suites assert them.
 
-The last row is the honest case: a DSH plugin that is purely a UI/service
-overlay has nothing to bridge, and the preview says so instead of pretending.
+## Verified, and how
 
-Bridged tools are executed in the tests, not just listed — `web_search` and
-`source_check` respond with their own argument-validation errors, which proves
-the real package logic runs under the receiving host's tool shape.
+Everything above was measured against real hosts, not against a mock:
+
+- a real DSH boot with a real model, installing `npm:pi-web-access` and calling
+  `web_web_search` through it (results came from the package's own provider),
+- a real DSH session loading a bundle that bare-imports `@deepseek-ai/dsh-tools`,
+  then serving it over loopback to a separate process that called its tool,
+- pi running this bridge's own DSH entry through the same machinery a foreign
+  bundle meets.
+
+Each of those caught a bug no mock could: a missing file in the publish list,
+an output schema the host refused so the plugin silently never activated,
+`process.execPath` being the app rather than node inside a host, a reinstall
+reporting zero capabilities because a daemon had already loaded the package,
+a scope that forbids property assignment, a server handler running outside the
+fiber that activated the services, and the host refusing a duplicate tool name.
+
+```bash
+npm test                # every offline suite
+npm run test:offline    # pipeline + both host entries
+npm run test:proxy      # daemon, DSH-side and pi-side forwarding
+npm run test:host       # against an installed DSH build (see note)
+npm run test:network    # real published packages from npm and GitHub
+npm run test:live       # the above against an actually running pi
+```
+
+`test:host` reads the installed host's own `@deepseek-ai/dsh-tools` from inside
+its asar, which only an Electron-patched fs can reach; run it from a host
+process. Under plain node it reports an explicit SKIP instead of implying the
+host refused us.
+
+The offline suites build their fixtures by hand - a TypeScript pi extension
+using the TypeBox builder, a DSH bundle using `defineTool`, a bundle that
+bare-imports host packages - then run the whole pipeline against a recording
+stand-in and execute the bridged tools. Some rules are asserted statically
+because they only surface on a real boot: the shape a host accepts for a schema,
+which files must be published, that analysing a bundle starts no process and
+binds no port.
 
 ## What does not cross
 
 The bridge reports these instead of failing quietly:
 
-- **Model providers and adapters** (`pi.registerProvider`, `ctx.llm.registerAdapter`): wired to host
-  internals, not portable.
-- **Host UI**: DSH browser pages / `ctx.slots` and pi’s TUI renderers, `ctx.ui`, shortcuts, CLI flags.
-- **Events without a counterpart**: a small name map covers the lifecycle overlap
-  (`session_start` ↔ `agent/created`, `tool_call` ↔ `tools/pre-execute`, …); anything else is listed.
+- **Host UI**: DSH browser pages / `ctx.slots`, pi's TUI renderers, `ctx.ui`,
+  shortcuts, CLI flags.
+- **Model adapters registered into a host**: a package that adds a provider does
+  that to its own host, which is the point of not translating - pi providers land
+  in pi, DSH adapters in DSH.
+- **A DSH bundle with nothing callable**: a pure UI or settings overlay has no
+  tools to forward. Preview says so rather than inventing capability.
+- **Packages that need an interactive host**: a forwarding call can stream
+  progress but cannot show a picker on the other side.
 
-Registrations land in the current session immediately, and each host replays the recorded bridges when
-the plugin loads, so an install survives a restart. That replay is cache-only: host startup never waits
-on a network download, and a pruned cache simply reports the bridge as unavailable until it is installed
-again. `restoreOnLoad: false` in the bundle config turns replay off.
+## Persistence
 
-The bridge keeps its own registry at `~/.dsh-pi-bridge/bridges.json` and writes nothing into either
-host’s settings. `bridge_remove` forgets a bridge and deletes its mirror; tools already registered in
-the running process stay until restart, because silently unregistering host state would be worse than
+Registrations land in the current session immediately. Each host reloads what it
+recorded from `~/.dsh-pi-bridge/bridges.json` when the plugin loads, so an
+install survives a restart - verified by restarting a DSH session and finding the
+bridged tools already there. That reload is cache-only: host startup never waits
+on a network download, and a pruned cache reports the bridge as unavailable
+rather than hanging. Restarting is also what lets other clients (the Web GUI,
+a second window) see the new tools, because they build their tool list at start.
+`restoreOnLoad: false` in the bundle config turns it off.
+
+Nothing is written into either host's settings. `bridge_remove` forgets a bridge
+and clears its build directory; tools already registered in a running process
+stay until restart, because silently unregistering host state is worse than
 leaving it visible.
 
 ## Security
 
-A bridged package **executes code with your permissions**, on whichever side you install it — the
-same trust requirement every extension host has, doubled because the package came from the other
-ecosystem and was not vetted by its market. Read its source before you install it.
+A bridged package **executes code with your permissions** on the side it runs
+in - the same requirement every extension host has, heightened because the
+package came from the other ecosystem and was not vetted by its market. Read
+its source first; `preview` resolves and inspects without registering anything.
 
-The bridge limits the blast radius, it does not remove it: packages load from a private mirror whose
-`node_modules` contains only generated stubs, so a bridged extension cannot import the real host API
-or reach either host’s configuration through the import map. `preview` first — it resolves and
-captures but registers nothing.
-
-## Develop
-
-```bash
-```bash
-npm test                # offline suites: 40 checks + both host entries + self-bridge
-npm run test:offline    # just the pipeline self-test
-npm run test:entries    # both real entries and the host-facing surface
-npm run test:host       # acceptance against an installed DSH build (see note)
-npm run test:network    # real published packages from npm and GitHub
-```
-
-`test:host` reads the installed host's own `@deepseek-ai/dsh-tools` from inside its asar, which only
-an Electron-patched fs can reach. Run it from a host process (or the harness); under plain Node it
-reports an explicit SKIP rather than pretending the host refused us.
-```
-
-The self-test builds fixtures by hand — a TypeScript pi extension using the TypeBox builder, and a
-DSH bundle using `defineTool` with an async skill provider — then runs the full pipeline against a
-recording mock host and executes the bridged tools. `scripts/selfhost-check.mjs` feeds this package's
-own DSH entry through the bridge, so the entry conventions are tested by the same machinery a foreign
-bundle meets.
-
-Nothing is written outside `~/.dsh-pi-bridge` (override with `DSH_PI_BRIDGE_HOME`). A bridged package
-sees only its mirrored build tree, so its relative imports work while its host imports resolve to the
-bridge's stubs.
+Forwarding does not sandbox the package: it runs with the full trust of its own
+host, which is why it works. The loopback endpoint is bound to 127.0.0.1, is
+off unless you set `DSH_PI_BRIDGE_DSH_SERVE`, and the client refuses to talk to
+a non-loopback address. Anything able to reach that port can invoke the tools
+the session has loaded, so keep it off unless you need it.
 
 ## Layout
 
 ```text
-index.js              DSH entry: name / inject / apply(ctx), the pi_install tool family
-extensions/index.js   pi entry: default(pi) factory, /dsh-install and the dsh_install tools
-skills/dsh-pi-bridge/ SKILL.md, shared by both hosts
-cordis.patch.yml      DSH bundle mount (the plugin panel toggle target)
-src/manifest.js       host detection from keywords, manifests and directory layout
-src/resolve.js        npm / git / url / local sources into a cache
-src/tar.js            gzipped-tar reader (npm tarballs), no dependency
-src/transpile.js      TypeScript -> ESM via node:module, swc/typescript fallback
-src/stubs.js          import scanning + inert stub generation
-src/typebox-shim.js   TypeBox- and zod-shaped builders over plain JSON Schema
-src/capture.js        recording stand-in hosts for both entry conventions
-src/schema.js         parameter schema conversion, both directions
-src/replay-dsh.js     capabilities -> ctx.tools / ctx.commands / ctx.skills
-src/replay-pi.js      capabilities -> pi.registerTool / registerCommand / resources_discover
-src/capabilities.js   normalized capability model, event name map, result projection
+index.js                DSH entry: name / inject / apply(ctx), the pi_* tools
+extensions/index.js     pi entry: default(pi) factory, the dsh_* tools and commands
+skills/dsh-pi-bridge/   SKILL.md, shared by both hosts
+cordis.patch.yml        DSH bundle mount (the plugin panel toggle target)
+daemon/run.mjs          supervised pi process; the loopback front for its tools
+daemon/bootstrap.js     loaded inside pi by its real extension loader
+src/proxy.js            DSH side: start/reuse the daemon, forward a call
+src/dsh-loader.js       DSH side: load a bundle at runtime against the live scope
+src/serve.js            DSH side: loopback endpoint for the other host
+src/dsh-host-client.js  pi side: talk to a live DSH session
+src/resolve.js          npm / git / url / local sources into the cache, with deps
+src/load.js             build a mirror tree, compile TS, install real dependencies
+src/manifest.js         host detection from keywords, manifests and layout
+src/capture.js          recording stand-in hosts for both entry conventions
+src/schema.js           parameter schema conversion, both directions
+src/capabilities.js     normalized capability model, result projection
+src/replay-dsh.js       capabilities -> ctx.tools / commands / skills
+src/replay-pi.js        capabilities -> pi.registerTool / registerCommand
+src/restore.js          reload recorded bridges on host start
+src/stubs.js            import scanning and stub generation for preview
+src/tar.js              gzipped-tar reader, no dependency
+src/transpile.js        TypeScript -> ESM via node:module
 ```
 
-`index.js` imports only `node:` builtins plus this package, and declares `inject: [‘tools’]` with
-everything else acquired through `ctx.inject`, so a profile that composes without the skill registry
-loses skill mounting rather than failing to load.
+`index.js` imports only `node:` builtins plus this package, and declares
+`inject: ["tools"]` - the only service it requires. Skills and settings are
+reached through `ctx.inject` behind a capability check, so a profile that does
+not compose the skill registry simply mounts no skills instead of failing to
+start.
 
 ## License
 

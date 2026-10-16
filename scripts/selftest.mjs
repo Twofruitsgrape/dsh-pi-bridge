@@ -502,6 +502,49 @@ async function main () {
     check('restore has a bounded wait', /waitMs: \d+/.test(src), (src.match(/waitMs: \d+/) || ['none'])[0])
   }
 
+  console.log('forwarded tools are never restored as stubs')
+  {
+    // A DSH bundle loaded inside a live DSH session must come back the same way
+    // after a restart. Restoring it through the translation path instead yields
+    // stubbed look-alikes of tools that really worked - a silent downgrade, and
+    // one observed on a real run. The routing decision is a name check, so assert
+    // it as a name check rather than trusting a mock to notice.
+    const src = await (await import('node:fs/promises')).readFile(path.join(ROOT, 'extensions', 'index.js'), 'utf8')
+    check('host-load entries are separated before replay', /entry\.mode === "dsh-host"/.test(src))
+    check('they are restored by forwarding', /for \(const spec of forwardSpecs\)[\s\S]{0,160}installDshViaHost/.test(src))
+    check('no DSH session means no stubbed substitute', /not replaying it as stubs/.test(src))
+    check('the replay path only sees non-forward entries', /restoreIntoPi\(pi, replayState/.test(src))
+  }
+
+  console.log('no percent-encoded path derivation')
+  {
+    // Twice now a file path was derived from new URL(...).pathname, which keeps
+    // percent-escapes: under this Chinese working directory it produced
+    // 'dsh%E6%8F%92%E4%BB%B6...' and every lookup failed with a confusing
+    // 'not a directory'. fileURLToPath is the only correct conversion, so no
+    // shipped module may touch .pathname for paths at all.
+    const { readFile: rf } = await import('node:fs/promises')
+    const targets = ['index.js', 'extensions/index.js', 'daemon/run.mjs', 'daemon/bootstrap.js',
+      'src/load.js', 'src/proxy.js', 'src/resolve.js', 'src/restore.js', 'src/dsh-loader.js',
+      'src/serve.js', 'src/dsh-host-client.js', 'src/stubs.js', 'src/inert.js', 'src/manifest.js']
+    const offenders = []
+    for (const rel of targets) {
+      let text = ''
+      try { text = await rf(path.join(ROOT, rel), 'utf8') } catch { offenders.push(rel + ': unreadable'); continue }
+      for (const line of text.split('\n')) {
+        if (/\.pathname/.test(line) && !/fileURLToPath/.test(line)) offenders.push(rel + ': ' + line.trim().slice(0, 90))
+      }
+    }
+    check('no shipped module derives a path from URL.pathname', offenders.length === 0, offenders.join(' | '))
+    // And every module that needs a directory must import the decoder.
+    const needs = ['index.js', 'daemon/run.mjs', 'daemon/bootstrap.js', 'src/load.js', 'src/proxy.js', 'src/dsh-loader.js']
+    const missingImport = []
+    for (const rel of needs) {
+      try { const x = await rf(path.join(ROOT, rel), 'utf8'); if (/fileURLToPath\(/.test(x) && !/import .*fileURLToPath/.test(x)) missingImport.push(rel) } catch { /* checked above */ }
+    }
+    check('fileURLToPath is imported where used', missingImport.length === 0, missingImport.join(', '))
+  }
+
   console.log('caches stay outside the published tree')
   {
     // A 1.9 GB npm-install tree once landed under scripts/: files:["scripts"] would

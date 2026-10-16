@@ -85,9 +85,26 @@ async function readRegistry () {
   try { return JSON.parse(await readFile(REGISTRY_FILE, 'utf8')) } catch { return { bridges: {} } }
 }
 
-async function writeRegistry (state) {
+/**
+ * Record this host's bridges without erasing the other host's.
+ *
+ * Both halves share one file. Writing our own snapshot back would drop an entry
+ * the other host recorded while we were working, so merge over the newest copy on
+ * disk. Removed keys are passed explicitly, because a plain merge would otherwise
+ * resurrect an entry that bridge_remove just forgot.
+ *
+ * @param {any} state
+ * @param {string[]} [removed]
+ */
+async function writeRegistry (state, removed) {
   await mkdir(CACHE_ROOT, { recursive: true })
-  await writeFile(REGISTRY_FILE, JSON.stringify(state, null, 2), 'utf8')
+  let merged = { bridges: {} }
+  try { merged = JSON.parse(await readFile(REGISTRY_FILE, 'utf8')) } catch { /* first write */ }
+  merged.bridges = merged.bridges || {}
+  for (const [k, v] of Object.entries(state.bridges || {})) merged.bridges[k] = v
+  for (const k of removed || []) delete merged.bridges[k]
+  state.bridges = merged.bridges
+  await writeFile(REGISTRY_FILE, JSON.stringify(merged, null, 2), 'utf8')
 }
 
 function defaultPrefix (spec) {
@@ -147,6 +164,29 @@ export async function apply (ctx, config) {
   const state = await readRegistry()
   state.bridges = state.bridges || {}
   const log = (m) => { try { ctx.logger && ctx.logger.info && ctx.logger.info(m) } catch { /* ignore */ } }
+
+  /**
+   * A snapshot of the host services, read while this fiber is still active.
+   *
+   * ctx is a cordis Proxy that resolves a service out of the fiber's own store,
+   * so reading ctx.tools from an async callback that outlived apply() throws
+   * 'cannot get required service "tools" in inactive context' - measured on a
+   * live boot, where the HTTP handler of the serve endpoint tried to load a
+   * bundle and failed even though the identical call through the host's own tool
+   * dispatch worked. Host tools are invoked inside an active fiber, which is why
+   * dsh_install works and the server does not. Reading every service once, here,
+   * gives the background path something stable to use.
+   */
+  const serviceSnapshot = {}
+  for (const key of new Set(['tools', 'commands', 'skills', 'llm', 'sessions', 'settings', 'agent', 'workspace', 'subagents', 'events', 'logger'].concat(Object.keys(ctx || [])))) {
+    try { const value = ctx[key]; if (value !== undefined) serviceSnapshot[key] = value } catch { /* not composed in this profile */ }
+  }
+  const serveScope = new Proxy(ctx, {
+    get (target, prop) {
+      if (prop in serviceSnapshot) return serviceSnapshot[prop]
+      return target[prop]
+    },
+  })
 
   /**
    * Register one DSH forwarding tool per capability pi just loaded. Parameters
@@ -272,7 +312,7 @@ export async function apply (ctx, config) {
     output: OUT(),
     execute: guarded(async (args) => {
       const m = await materialize(args.source, { log, refresh: !!args.refresh })
-      const loaded = await loadDshBundle(m.root, ctx, { genDir, log })
+      const loaded = await loadDshBundle(m.root, ctx, { genDir, log, registered: new Set(hostCallable.keys()) })
       if (loaded.error) throw new Error(loaded.error)
       for (const t of loaded.tools || []) {
         const def = loaded.callable && loaded.callable.get(t.name)
@@ -325,7 +365,7 @@ export async function apply (ctx, config) {
       if (!state.bridges[args.source]) return 'not bridged: ' + args.source
       const entry = state.bridges[args.source]
       delete state.bridges[args.source]
-      await writeRegistry(state)
+      await writeRegistry(state, [args.source])
       const target = entry.root || entry.mirror
       if (target) await rm(target, { recursive: true, force: true })
       return 'removed ' + args.source + ' from the bridge registry (restart DSH to drop its registrations)'
@@ -419,8 +459,14 @@ export async function apply (ctx, config) {
       load: async (source) => {
         if (!source) throw new Error('no source given')
         const m = await materialize(source, { log })
-        const r = await loadDshBundle(m.root, ctx, { genDir, log })
+        const r = await loadDshBundle(m.root, serveScope, { genDir, log, registered: new Set(hostCallable.keys()) })
         if (r.error) return { error: r.error, tools: [], commands: [] }
+        // Tools the session already had are still exposed: they were registered by
+        // the user's own dsh_install, and their definitions are in hostCallable.
+        for (const n of r.reused || []) {
+          const had = hostCallable.get(n)
+          if (had) r.tools.push({ name: n, description: String((had.def && had.def.description) || ''), parameters: had.def && had.def.parameters })
+        }
         for (const t of r.tools || []) {
           const def = r.callable && r.callable.get(t.name)
           if (def) hostCallable.set(t.name, { def, source })
