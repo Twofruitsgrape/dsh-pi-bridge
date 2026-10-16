@@ -9,7 +9,6 @@ node_modules/
 .all.out
 .all.log
 .probe-bundle/
-.hostload-fixture/
 .tmp_*/
 .entry-cache/
 .poll.out

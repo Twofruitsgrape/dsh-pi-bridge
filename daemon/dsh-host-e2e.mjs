@@ -111,7 +111,7 @@ check('a successful call stays successful', failCall.details.error !== true)
 server.close()
 const saved = process.env.DSH_PI_BRIDGE_DSH_ENDPOINT
 process.env.DSH_PI_BRIDGE_DSH_ENDPOINT = '127.0.0.1:' + (PORT + 7)
-const fixture = path.join(ROOT, '.hostload-fixture').replace(/\\/g, '/')
+const fixture = path.join(ROOT, 'scripts', 'fixtures', 'dsh-hostload').replace(/\\/g, '/')
 const r2 = await installTool.execute('id', { source: fixture }, undefined, undefined, { ui: { notify: () => {} } })
 const text2 = String(r2.content[0].text)
 check('unreachable DSH still completes', Array.isArray(r2.content), text2.slice(0, 160))

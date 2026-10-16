@@ -17,7 +17,7 @@ import path from 'node:path'
 // working directory turned into a path that does not exist ("dsh%E6%8F%92...").
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
-const FIXTURE = process.argv[2] || path.join(ROOT, '.hostload-fixture')
+const FIXTURE = process.argv[2] || path.join(ROOT, 'scripts', 'fixtures', 'dsh-hostload')
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 let failures = 0

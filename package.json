@@ -55,6 +55,7 @@
     "scripts/entry-check.mjs",
     "scripts/run-all.mjs",
     "scripts/loader-unit.mjs",
+    "scripts/fixtures/**",
     "tools/selfhost-check.mjs",
     "tools/realhost-check.mjs",
     "tools/e2e-preview.mjs",

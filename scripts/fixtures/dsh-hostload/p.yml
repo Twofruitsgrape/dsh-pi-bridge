@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-hostload-fixture
+      name: 'dsh-hostload-fixture'
+      config: {}
