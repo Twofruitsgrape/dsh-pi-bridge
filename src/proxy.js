@@ -103,8 +103,16 @@ export function daemonLaunch (env = process.env, platform = process.platform, is
  * before that.
  * @param {{log?:(m:string)=>void}} [options]
  */
+/**
+ * @param {{log?:(m:string)=>void, waitMs?:number}} [options]
+ *        waitMs bounds how long to wait for the bootstrap to report a context.
+ *        Restoring at host start uses a short budget: if pi cannot be started
+ *        here, waiting 45 seconds per bridge would stall the host for minutes
+ *        before the first message, and the user can still install explicitly.
+ */
 export async function ensureDaemon (options) {
   const log = (options && options.log) || (() => {})
+  const budgetMs = Math.max(2000, Number((options && options.waitMs) || 45000))
   try {
     const h = await health()
     if (h && h.ok) return h
@@ -130,14 +138,15 @@ export async function ensureDaemon (options) {
     child.on('error', (e) => { void record('spawn failed: ' + (e && e.message) + '\n') })
     child.on('exit', (code) => { child = null; void record('daemon exited ' + code + '\n') })
     child.unref()
-    for (let i = 0; i < 45; i++) {
+    const attempts = Math.max(2, Math.round(budgetMs / 1000))
+    for (let i = 0; i < attempts; i++) {
       await new Promise((r) => setTimeout(r, 1000))
       try {
         const h = await health()
         if (h && h.ok && h.ctx) { log('daemon up (pid ' + h.pid + ')'); return h }
       } catch { /* keep waiting */ }
     }
-    throw new Error('the pi daemon did not become ready; check ' + LOG)
+    throw new Error('the pi daemon did not become ready within ' + budgetMs + 'ms; check ' + LOG)
   })().finally(() => { starting = null })
   return starting
 }
@@ -188,12 +197,13 @@ export async function materialize (spec, options) {
  */
 export async function loadIntoPi (materialized, options) {
   const log = (options && options.log) || (() => {})
+  const waitMs = options && options.waitMs
   const root = typeof materialized === 'string' ? materialized : materialized && materialized.root
   if (!root) throw new Error('loadIntoPi needs the result of materialize()')
   if (typeof materialized === 'object' && materialized.dependencies && materialized.dependencies.status === 'failed') {
     throw new Error('refusing to load: dependencies failed (' + materialized.dependencies.reason + ')')
   }
-  await ensureDaemon({ log })
+  await ensureDaemon({ log, waitMs })
   return request('POST', '/load', { root }, 60000)
 }
 

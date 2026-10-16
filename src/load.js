@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { resolve as resolveSource, installDependencies, PACKAGES_DIR, CACHE_ROOT } from './resolve.js'
-import { classify, piEntries, walk, dshEntry } from './manifest.js'
+import { classify, exists, piEntries, walk, dshEntry } from './manifest.js'
 import { scanImports, makeStubs, splitSpecifier, toFileUrl } from './stubs.js'
 import { emitBuild, stripAvailable } from './transpile.js'
 import { capturePi, captureDsh } from './capture.js'
@@ -91,8 +91,13 @@ export async function loadForeign (spec, options) {
 
   const buildRoot = path.join(CACHE_ROOT, 'build')
   await mkdir(buildRoot, { recursive: true })
-  const mirror = path.join(buildRoot, slug(info.name) + '@' + slug(info.version) + '-' + host)
-  await rm(mirror, { recursive: true, force: true })
+  let mirror = path.join(buildRoot, slug(info.name) + '@' + slug(info.version) + '-' + host)
+  // A previous daemon may still hold files in an old mirror (Windows locks the
+  // directory of a running process's cwd), and rm throws EBUSY there. Dropping
+  // the whole install over a stale directory would make reinstalling a package
+  // permanently fail, so fall back to a fresh unique mirror instead.
+  await removeQuietly(mirror, log)
+  if (await exists(mirror)) mirror = mirror + '-' + Date.now().toString(36)
   // cp's filter is called as filter(source, destination): the source root has to
   // be bound explicitly, or the destination becomes the "relative" base and every
   // entry looks like it escapes the package. A destination inside the source is
@@ -160,6 +165,26 @@ export async function loadForeign (spec, options) {
 }
 
 /** True when child sits inside parent. */
+/**
+ * Remove a directory tree without letting a locked path abort the operation.
+ *
+ * A previous pi daemon can still hold files inside an old mirror, and Windows
+ * keeps a directory busy while it is some process's cwd. rm then throws EBUSY and
+ * a reinstall would fail forever, so an unavoidable stale directory is reported
+ * and a fresh one is used instead.
+ */
+async function removeQuietly (dir, log) {
+  try {
+    await rm(dir, { recursive: true, force: true })
+    return true
+  } catch (e) {
+    const code = String((e && e.code) || '')
+    if (code !== 'EBUSY' && code !== 'EPERM' && code !== 'ENOTEMPTY') throw e
+    log('could not clear a stale build directory (' + code + '); using a fresh one')
+    return false
+  }
+}
+
 function isInside (parent, child) {
   const a = path.resolve(parent).replace(/\\/g, '/')
   const b = path.resolve(child).replace(/\\/g, '/')
@@ -176,7 +201,7 @@ function keepCopy (source, root) {
   // cp asks about the root itself first; rejecting it skips the whole tree.
   if (rel === '') return true
   if (rel === '..' || rel.startsWith('..' + path.sep) || rel.startsWith('../')) return false
-  return !/(^|[/])(\.git|node_modules|_dsh_pi_bridge|[.][a-z0-9-]*cache)([/]|$)/.test('/' + rel)
+  return !/(^|[/])(\.git|node_modules|\.tmp|_dsh_pi_bridge|[.][a-z0-9-]*cache)([/]|$)/.test('/' + rel)
 }
 
 function slug (s) {

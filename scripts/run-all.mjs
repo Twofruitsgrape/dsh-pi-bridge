@@ -14,6 +14,10 @@ const SUITES = [
   ["offline pipeline", ["scripts/selftest.mjs"]],
   ["host entries", ["scripts/entry-check.mjs"]],
   ["self-bridge", ["tools/selfhost-check.mjs"]],
+  ["loader rules", ["scripts/loader-unit.mjs"]],
+  ["pi proxy", ["daemon/acceptance.mjs"]],
+  ["dsh proxy (DSH side)", ["daemon/dsh-proxy-e2e.mjs"]],
+  ["dsh host forwarding (pi side)", ["daemon/dsh-host-e2e.mjs"]],
 ]
 
 // A missing suite file is a packaging bug, not an optional skip: fail loudly.

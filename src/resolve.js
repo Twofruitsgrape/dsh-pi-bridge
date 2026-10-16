@@ -143,7 +143,7 @@ async function fromLocal (id, dest, log) {
 function isExcluded (target, root) {
   const rel = (root ? path.relative(String(root), String(target)) : String(target)).replace(/\\/g, '/')
   if (rel.startsWith('..')) return true
-  return /(^|[/])(\.git|node_modules|_dsh_pi_bridge|[.][a-z0-9-]*cache)([/]|$)/.test('/' + rel)
+  return /(^|[/])(\.git|node_modules|\.tmp|_dsh_pi_bridge|[.][a-z0-9-]*cache)([/]|$)/.test('/' + rel)
 }
 
 /** Recursive copy that skips excluded subtrees and its own destination. */

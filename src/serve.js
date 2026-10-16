@@ -1,0 +1,59 @@
+/**
+ * A loopback endpoint inside a live DSH process, so another host (pi) can use
+ * DSH plugins without translating them.
+ *
+ * This is the DSH counterpart of the pi bootstrap: plugins stay inside their own
+ * host, where ctx.tools, ctx.llm and the skill registry are genuine, and the
+ * remote side only forwards. Off unless DSH_PI_BRIDGE_DSH_SERVE is set, so a
+ * normal DSH boot never opens a port. Bound to 127.0.0.1, and every call answers
+ * as data rather than throwing, so a bad plugin cannot take the host down.
+ *
+ * @module src/serve.js
+ */
+import { createServer } from 'node:http'
+
+const REGEX_PORT = /^127\.0\.0\.1$|::1$/
+
+/**
+ * @param {number} port
+ * @param {{load:(source:string)=>Promise<any>, call:(name:string,args:any)=>Promise<any>, list:()=>any[]}} handlers
+ * @returns {{close:()=>void, port:number}|null}
+ */
+export function startDshServer (port, handlers) {
+  if (!port || !Number.isFinite(port)) return null
+  const held = new Map()
+  const server = createServer((req, res) => {
+    let raw = ''
+    req.on('data', (c) => { raw += c })
+    req.on('end', async () => {
+      const url = (req.url || '/').split('?')[0]
+      const send = (obj) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)) }
+      try {
+        if (url === '/health') return send({ ok: true, pid: process.pid, serve: true, tools: handlers.list().length })
+        if (url === '/tools') return send({ ok: true, tools: handlers.list() })
+        const body = raw ? JSON.parse(raw) : {}
+        if (url === '/load') {
+          const r = await handlers.load(body.source)
+          for (const t of r.tools || []) held.set(t.name, r)
+          return send({ ok: !r.error, ...r, callable: undefined })
+        }
+        if (url === '/call') {
+          const r = await handlers.call(body.name, body.args || {})
+          return send(r)
+        }
+        return send({ ok: false, error: 'not found: ' + url })
+      } catch (e) {
+        return send({ ok: false, error: 'dsh serve: ' + String((e && e.message) || e).slice(0, 300) })
+      }
+    })
+  })
+  server.on('error', () => { /* port busy: the caller reports it */ })
+  server.listen(port, '127.0.0.1')
+  void held
+  return { close: () => server.close(), port }
+}
+
+/** True for the loopback addresses this endpoint accepts. */
+export function isLoopback (host) {
+  return REGEX_PORT.test(String(host || ''))
+}

@@ -54,6 +54,9 @@ export function specToJsonSchema (map) {
   if (!isPlainObject(map)) return out
   for (const [key, raw] of Object.entries(map)) {
     const prop = isPlainObject(raw) ? { ...raw } : { type: 'json' }
+    // 'required: true' on a property is DSH's marker, not valid JSON Schema at a
+    // property node; the name already appears in the object-level list below.
+    delete prop.required
     if (!SCALAR.has(prop.type)) prop.type = 'json'
     if (prop.type === 'object' && isPlainObject(raw.properties)) {
       const nested = specToJsonSchema(raw.properties)

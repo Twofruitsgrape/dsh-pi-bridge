@@ -1,3 +1,16 @@
 node_modules/
 .tmp/
 *.tgz
+# session scaffolding: never commit or publish
+.tmp-*
+.run-*.sh
+.poll-*.sh
+.all.sh
+.all.out
+.all.log
+.probe-bundle/
+.hostload-fixture/
+.tmp_*/
+.entry-cache/
+.poll.out
+nohup.out

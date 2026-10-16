@@ -20,10 +20,11 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { readFile, writeFile, mkdir, rm } from 'node:fs/promises'
 import { installThroughProxy, loadIntoPi, callTool, listTools, materialize, ensureDaemon } from './src/proxy.js'
-import { loadForeign } from './src/load.js'
-import { replayIntoDsh, skillProviderFor } from './src/replay-dsh.js'
+import { skillProviderFor } from './src/replay-dsh.js'
 import { restoreIntoDsh } from './src/restore.js'
 import { toToolSpec } from './src/schema.js'
+import { loadDshBundle } from './src/dsh-loader.js'
+import { startDshServer } from './src/serve.js'
 import { projectResult } from './src/capabilities.js'
 import { CACHE_ROOT } from './src/resolve.js'
 
@@ -32,6 +33,8 @@ export const inject = ['tools']
 
 const REGISTRY_FILE = path.join(CACHE_ROOT, 'bridges.json')
 const HERE = path.dirname(fileURLToPath(import.meta.url))
+/** Where host-rewritten bundles are written: outside every published dir. */
+const genDir = path.join(CACHE_ROOT, 'gen')
 
 /**
  * Tool output in the shape the host's tools service validates directly.
@@ -150,6 +153,15 @@ export async function apply (ctx, config) {
    * are the package's own schema; a call goes to pi and pi's native result comes
    * back, so what the model sees is pi's behaviour rather than a translation.
    */
+  /**
+   * Every tool this session loaded through the bridge, with the definition needed
+   * to invoke it. Both dsh_install and the serve endpoint use it, so a tool the
+   * user installed from the DSH chat is also callable from the other host - the
+   * earlier split, where only /load recorded, left the server blind to installs
+   * made through the tool (observed on a live boot: /tools answered []).
+   */
+  const hostCallable = new Map()
+
   /** Names this process registered, so a reinstall is a no-op rather than a clash. */
   const shellNames = new Set()
   function registerShells (prefix, tools, report) {
@@ -242,18 +254,49 @@ export async function apply (ctx, config) {
     execute: guarded(async (args) => previewText(args.source)),
   }))
 
+  /**
+   * Load another DSH bundle into this running host.
+   *
+   * Unlike the pi direction there is nothing to proxy: the bundle is applied
+   * against this same live scope, so its tools are real host tools with real
+   * ctx.services. The one obstacle is that a linked bundle cannot resolve bare
+   * '@deepseek-ai/*' specifiers; dsh-loader rewrites those to the running
+   * build's own modules (verified against a live DSH boot, where a bundle so
+   * loaded registered a tool the model then called). A prefix is ignored here:
+   * tool names belong to the bundle.
+   */
   ctx.tools.register(tool({
     name: 'dsh_install',
-    description: 'Load another DSH plugin bundle into this DSH session through the bridge, for a bundle the profile does not mount. Same-host loading, so registrations replay directly; it does not replace a bundle the profile already installed.',
-    parameters: { source: SOURCE, prefix: PREFIX },
+    description: 'Load another DSH plugin bundle into this running DSH session, for a bundle the profile does not mount. The bundle is applied against the live host scope, so its tools use the real tools/llm/skills services; bare @deepseek-ai imports are resolved to the running build. Reports what it registered. Does not replace a bundle the profile already mounted.',
+    parameters: { source: SOURCE, refresh: { type: 'boolean', description: 'Re-download the source even when cached.' } },
     output: OUT(),
     execute: guarded(async (args) => {
-      const captured = await loadForeign(args.source, { host: 'dsh', log })
-      const prefix = args.prefix || defaultPrefix(args.source)
-      const report = await replayIntoDsh(ctx, captured, { prefix })
-      state.bridges[args.source] = { name: captured.info.name, version: captured.info.version, host: 'dsh', mode: 'replay', prefix, mirror: captured.mirror, report, at: new Date().toISOString() }
+      const m = await materialize(args.source, { log, refresh: !!args.refresh })
+      const loaded = await loadDshBundle(m.root, ctx, { genDir, log })
+      if (loaded.error) throw new Error(loaded.error)
+      for (const t of loaded.tools || []) {
+        const def = loaded.callable && loaded.callable.get(t.name)
+        if (def) hostCallable.set(t.name, { def, source: args.source })
+      }
+      const report = {
+        tools: loaded.tools.map((t) => t.name),
+        commands: loaded.commands.map((c) => c.name),
+        skills: [],
+        skipped: [],
+        host: 'dsh',
+      }
+      state.bridges[args.source] = {
+        name: loaded.name, version: m.info.version, host: 'dsh', mode: 'host-load',
+        root: m.root, report, at: new Date().toISOString(),
+      }
       await writeRegistry(state)
-      return formatReport(args.source, captured.info, report)
+      const lines = ['loaded ' + loaded.name + '@' + m.info.version + ' into this DSH session']
+      lines.push('  dependencies: ' + ((m.dependencies && m.dependencies.status) || 'n/a'))
+      lines.push('  tools: ' + (report.tools.length ? report.tools.join(', ') : 'none'))
+      lines.push('  commands: ' + (report.commands.length ? report.commands.map((c) => '/' + c).join(', ') : 'none'))
+      if (loaded.mapped && loaded.mapped.length) lines.push('  host modules rewired: ' + loaded.mapped.join(', '))
+      if (!report.tools.length && !report.commands.length) lines.push('  (the bundle registered nothing: it may be UI-only, or need a service this profile does not compose)')
+      return lines.join('\n')
     }),
   }))
 
@@ -305,24 +348,46 @@ export async function apply (ctx, config) {
     }),
   }))
 
+  // Two markers keep analysis side-effect free. A bridge that only wants to
+  // know what a bundle registers (pi_preview, self-host checks, the other host
+  // loading this one) must not start a pi daemon or bind a port: the bundle's
+  // apply() runs here against a stand-in scope, so anything it launches would be
+  // launched by an inspection.
+  const capturing = process.env.DSH_PI_BRIDGE_CAPTURING === '1'
+
   // Reload recorded pi packages and remount their skills so an install survives a
   // restart. This uses the local cache only: host startup must never wait on a
   // network download, and a pruned cache reports itself instead of hanging.
   const replayable = { bridges: {} }
+  // One bounded attempt: if the first bridge cannot start the daemon, the rest
+  // would each pay the same wait, and DSH would sit there before its first answer.
+  // null: untried. true: the daemon answered once, so later bridges may reuse it.
+  // false: it failed, and repeating the wait per bridge would stall host startup.
+  let daemonProved = null
   for (const [spec, entry] of Object.entries(state.bridges)) {
     if (entry.mode === 'proxy') {
       if (!entry.root || !existsSync(path.join(entry.root, 'package.json'))) {
         log('restore skipped ' + spec + ': cached package is gone')
         continue
       }
+      if (capturing) {
+        log('restore skipped ' + spec + ': inspecting this bundle, not loading it')
+        continue
+      }
+      if (daemonProved === false) {
+        log('restore skipped ' + spec + ': pi daemon unavailable')
+        continue
+      }
       try {
-        const loaded = await loadIntoPi({ root: entry.root, dependencies: { status: 'installed' } }, { log })
+        const loaded = await loadIntoPi({ root: entry.root, dependencies: { status: 'installed' } }, { log, waitMs: 8000 })
         const report = { tools: [], commands: [], skills: [], events: [], skipped: [] }
         const tools = (loaded.added && loaded.added.length) ? loaded.added : await bridgeTools()
         registerShells(entry.prefix || defaultPrefix(spec), tools, report)
         mountSkills((entry.report && entry.report.skillDirs) || (entry.report && entry.report.skills) || [])
+        daemonProved = true
         log('restored ' + spec + ': ' + report.tools.length + ' tool(s)')
       } catch (e) {
+        daemonProved = false
         log('restore failed ' + spec + ': ' + message(e))
       }
     } else {
@@ -330,7 +395,7 @@ export async function apply (ctx, config) {
     }
   }
 
-  const restore = (config && config.restoreOnLoad === false)
+  const restore = (capturing || (config && config.restoreOnLoad === false))
     ? { restored: [], failed: [] }
     : await restoreIntoDsh(ctx, replayable, { log })
   if (restore.failed.length) {
@@ -343,7 +408,53 @@ export async function apply (ctx, config) {
     if (existsSync(path.join(selfSkill, 'SKILL.md'))) scope.skills.registerProvider(() => skillProviderFor(selfSkill))
   })
 
-  log('dsh-pi-bridge loaded: ' + Object.keys(state.bridges).length + ' bridged package(s) on record')
+  // ---- serve: let another host (pi) use DSH plugins from this live process ----
+  // Off unless requested, so an ordinary DSH boot opens nothing. Handlers reuse
+  // the same materialize/load path as dsh_install, so a bundle served to pi is
+  // the same bundle the host would mount itself, with the host's real services.
+  const servePort = capturing ? 0 : (Number(process.env.DSH_PI_BRIDGE_DSH_SERVE || 0) || (config && Number(config.servePort) || 0))
+  if (servePort) {
+    const handlers = {
+      list: () => [...hostCallable.keys()],
+      load: async (source) => {
+        if (!source) throw new Error('no source given')
+        const m = await materialize(source, { log })
+        const r = await loadDshBundle(m.root, ctx, { genDir, log })
+        if (r.error) return { error: r.error, tools: [], commands: [] }
+        for (const t of r.tools || []) {
+          const def = r.callable && r.callable.get(t.name)
+          if (def) hostCallable.set(t.name, { def, source })
+        }
+        return { tools: r.tools, commands: r.commands, name: r.name, version: m.info.version }
+      },
+      call: async (name, args) => {
+        const entry = hostCallable.get(name)
+        if (!entry) return { ok: false, error: 'not loaded in this DSH session: ' + name }
+        if (typeof entry.def.execute !== 'function') return { ok: false, error: 'tool has no execute' }
+        try {
+          // The host passes a per-call execution object; a remote call has none, so
+          // an empty one stands in. Tools that need host services beyond ctx will
+          // report that themselves, and the caller sees a real error, not a fake ok.
+          const out = await entry.def.execute(args || {}, { })
+          return { ok: true, result: out }
+        } catch (e) {
+          return { ok: false, error: String((e && e.message) || e).slice(0, 300) }
+        }
+      },
+    }
+    const srv = startDshServer(servePort, handlers)
+    if (srv) log('dsh-pi-bridge serving DSH plugins on 127.0.0.1:' + servePort)
+    else log('dsh-pi-serve not started (port ' + servePort + ' unavailable)')
+    ctx.tools.register(tool({
+      name: 'dsh_serve_status',
+      description: 'Report whether this DSH session is serving its plugins to another host, and which tools are currently exposed.',
+      parameters: {},
+      output: OUT(),
+      execute: guarded(async () => JSON.stringify({ port: servePort, exposed: handlers.list() }, null, 1)),
+    }))
+  }
+
+    log('dsh-pi-bridge loaded: ' + Object.keys(state.bridges).length + ' bridged package(s) on record')
 }
 
 export default { name, inject, apply }

@@ -16,6 +16,7 @@ import { loadForeign } from "../src/load.js";
 import { replayIntoPi } from "../src/replay-pi.js";
 import { CACHE_ROOT } from "../src/resolve.js";
 import { restoreIntoPi } from "../src/restore.js";
+import { dshHostStatus, dshHostLoad, dshHostCall, dshParamsToSchema, dshEndpoint } from "../src/dsh-host-client.js";
 
 const REGISTRY = CACHE_ROOT + "/bridges.json";
 
@@ -78,7 +79,74 @@ async function previewText(captured) {
 }
 
 export default async function (pi) {
+  /** True when a live DSH session is listening; then plugins are forwarded, not translated. */
+  async function liveDshAvailable() {
+    try {
+      const h = await dshHostStatus();
+      return !!(h && h.ok && h.serve);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Install a DSH bundle by keeping it inside DSH. The bundle loads in the live
+   * DSH session (its ctx.tools, ctx.llm and skills are the real host's), pi gets
+   * one forwarding tool per capability, and every call returns DSH's own result.
+   */
+  /** Tool names this session registered, tracked here because ExtensionAPI exposes no registry. */
+  const registeredTools = new Set()
+
+  async function installDshViaHost(spec, opts) {
+    const prefix = (opts && opts.prefix) || shortPrefix(spec.split(/[\\/]/).pop() || "dsh");
+    const loaded = await dshHostLoad(spec);
+    if (!loaded || !loaded.ok) throw new Error((loaded && loaded.error) || "the DSH host refused to load " + spec);
+    const report = { tools: [], commands: [], skills: [], events: [], skipped: [] };
+    for (const t of loaded.tools || []) {
+      const name = prefix + "_" + t.name;
+      if (registeredTools.has(name)) continue;
+      try {
+        pi.registerTool({
+          name,
+          label: t.name,
+          description: (t.description || "(no description)") + " [dsh-pi-bridge: runs natively inside DSH from " + (loaded.name || "dsh") + "]",
+          promptSnippet: t.description ? String(t.description).slice(0, 120) : undefined,
+          parameters: dshParamsToSchema(t.parameters),
+          async execute(_id, params) {
+            const res = await dshHostCall(t.name, params || {});
+            if (!res || !res.ok) {
+              return { content: [{ type: "text", text: "DSH tool " + t.name + " failed: " + ((res && res.error) || "no result from DSH") }], details: { error: true, viaDsh: true } };
+            }
+            // DSH's defineTool contract returns { ok, result }; unwrap it.
+            const payload = res.result && typeof res.result === "object" && res.result.result !== undefined ? res.result : { result: res.result };
+            const text = typeof payload.result === "string" ? payload.result : JSON.stringify(payload.result ?? payload);
+            return { content: [{ type: "text", text: (payload.ok === false ? "error: " : "") + text }], details: { viaDsh: true, tool: t.name } };
+          },
+        });
+        registeredTools.add(name);
+        report.tools.push(name);
+      } catch (err) {
+        report.skipped.push("tool " + name + ": " + message(err));
+      }
+    }
+    for (const c of loaded.commands || []) report.commands.push(c.name);
+    return { spec, loaded, report, prefix, mode: "dsh-host" };
+  }
+
   async function installDsh(spec, opts) {
+    if (await liveDshAvailable()) {
+      const viaHost = await installDshViaHost(spec, opts);
+      const state = await readState();
+      state.bridges = state.bridges || {};
+      state.bridges[spec] = {
+        name: (viaHost.loaded && viaHost.loaded.name) || spec,
+        version: String((viaHost.loaded && viaHost.loaded.version) || "0"),
+        host: "dsh", prefix: viaHost.prefix, mirror: "", report: viaHost.report, mode: viaHost.mode,
+        at: new Date().toISOString(),
+      };
+      await writeState(state);
+      return formatReport(spec + " (via live DSH)", { info: { name: (viaHost.loaded && viaHost.loaded.name) || spec, version: (viaHost.loaded && viaHost.loaded.version) || "" } }, viaHost.report);
+    }
     const captured = await loadForeign(spec, { host: "dsh", refresh: !!(opts && opts.refresh) });
     const prefix = (opts && opts.prefix) || shortPrefix(captured.info.name);
     const report = replayIntoPi(pi, captured, { prefix });

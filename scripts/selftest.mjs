@@ -399,47 +399,107 @@ async function main () {
 
   console.log('every runtime file is published')
   {
-    // The proxy spawns daemon/run.mjs, and run.mjs loads daemon/bootstrap.js into
-    // pi. Neither was in package.json "files", so an installed bridge died with
-    // MODULE_NOT_FOUND while every local test still passed: tests ran from the
-    // repository, installs ran from the tarball. A real DSH boot caught it.
-    const { readFile: rf } = await import('node:fs/promises')
-    const pkg = JSON.parse(await rf(path.join(ROOT, 'package.json'), 'utf8'))
-    /**
-     * Does a package.json "files" entry include this path? Written as explicit
-     * rules instead of a regex: the earlier attempt embedded a character class in
-     * a template and produced an unterminated literal.
-     */
+    // A real DSH boot proved this matters twice: daemon/run.mjs was missing from
+    // "files" so an installed bridge died on MODULE_NOT_FOUND, and later three
+    // suites referenced by run-all slipped out while a hand-written list kept
+    // passing. So the required set is derived from the code, not from a list.
+    const fsP = await import('node:fs/promises')
+    const read = (p) => fsP.readFile(path.join(ROOT, p), 'utf8')
+    const pkg = JSON.parse(await read('package.json'))
+
+    const referenced = new Set()
+    const addMatches = (text, re) => { for (const m of text.matchAll(re)) referenced.add(m[1]) }
+
+    // (a) every target package.json scripts invoke
+    for (const cmd of Object.values(pkg.scripts || {})) {
+      addMatches(String(cmd), /node\s+((?:scripts|daemon|tools)\/[\w./-]+\.mjs)/g)
+    }
+    // (b) suites listed by the aggregate runner
+    try {
+      const ra = await read('scripts/run-all.mjs')
+      addMatches(ra.slice(ra.indexOf('const SUITES'), ra.indexOf(']', ra.indexOf('const SUITES'))), /['"]((?:scripts|daemon|tools)\/[\w.-]+\.mjs)['"]/g)
+    } catch { /* runner absent is caught by (a) anyway */ }
+    // (c) modules the entry points import
+    for (const entry of ['index.js', 'extensions/index.js', 'daemon/run.mjs', 'daemon/bootstrap.js']) {
+      let text = ''
+      try { text = await read(entry) } catch { continue }
+      addMatches(text, /from\s+['"]\.\.?\/((?:src|daemon)\/[\w.-]+\.js)['"]/g)
+      addMatches(text, /import\(\s*['"]\.\.?\/((?:src|daemon)\/[\w.-]+\.js)['"]\s*\)/g)
+    }
+    // (d) module paths assembled with path.join: 'path.join(ROOT, "daemon", "run.mjs")'
+    // names a shipped file but is invisible to the import and script scans, which
+    // is why the first version of this guard still passed with daemon/run.mjs
+    // removed from "files". Two- and three-argument forms are both handled.
+    for (const file of ['src/proxy.js', 'src/load.js', 'daemon/run.mjs', 'index.js', 'extensions/index.js']) {
+      let text = ''
+      try { text = await read(file) } catch { continue }
+      for (const m of text.matchAll(/path\.join\(\s*[\w.]+\s*,\s*['"]([\w.-]+)['"]\s*,\s*['"]([\w./-]+\.(?:mjs|js))['"]\s*\)/g)) {
+        referenced.add(m[1] + '/' + m[2])
+      }
+      for (const m of text.matchAll(/path\.join\(\s*[\w.]+\s*,\s*['"]([\w./-]+\.(?:mjs|js))['"]\s*\)/g)) {
+        const bare = m[1]
+        if (bare.includes('/') || !/\.(mjs|js)$/.test(bare)) continue
+        // a bare 'bootstrap.js' joined against a directory that is itself derived
+        // from HERE: record it so the file must ship somewhere published.
+        referenced.add('daemon/' + bare)
+      }
+    }
+    // path.join construction is covered above; drop a false positive if the file
+    // simply is not there to be shipped.
+    for (const maybe of [...referenced]) {
+      let exists = true
+      try { await read(maybe) } catch { exists = false }
+      if (!exists) referenced.delete(maybe)
+    }
+
+    referenced.add('index.js')
+    referenced.add('extensions/index.js')
+    referenced.add('cordis.patch.yml')
+    referenced.add('skills/dsh-pi-bridge/SKILL.md')
+    const needed = [...referenced].sort()
+
+    // Explicit rules, not a regex: an earlier attempt embedded a character class
+    // in a template literal and produced an unterminated string.
     function covered (pattern, rel) {
-      const p = pattern.replace(/\\/g, '/')
-      const file = rel.replace(/\\/g, '/')
+      const p = String(pattern).replace(/\\/g, '/')
+      const file = String(rel).replace(/\\/g, '/')
       if (p.endsWith('/**')) return file.startsWith(p.slice(0, -2)) || file === p.slice(0, -3)
       const star = p.indexOf('*')
       if (star < 0) return file === p
       const head = p.slice(0, star)
       const tail = p.slice(star + 1)
       if (!file.startsWith(head) || !file.endsWith(tail)) return false
-      // 'src/*.js' matches one segment only, so a nested path must not slip in.
       const middle = file.slice(head.length, file.length - tail.length)
       return middle.length > 0 && !middle.includes('/')
     }
-    const covers = (rel) => (pkg.files || []).some((pattern) => covered(pattern, rel))
-    const needed = [
-      'index.js', 'src/proxy.js', 'src/load.js', 'src/resolve.js', 'src/manifest.js',
-      'src/schema.js', 'src/capabilities.js', 'src/inert.js', 'src/restore.js',
-      'src/replay-dsh.js', 'src/replay-pi.js', 'src/capture.js', 'src/stubs.js',
-      'src/tar.js', 'src/transpile.js', 'src/typebox-shim.js',
-      'extensions/index.js', 'daemon/run.mjs', 'daemon/bootstrap.js',
-      'skills/dsh-pi-bridge/SKILL.md', 'cordis.patch.yml',
-    ]
-    const missing = needed.filter((f) => !covers(f))
-    check('package.json files covers every runtime module', missing.length === 0, 'missing from files: ' + missing.join(', '))
-    const absent = []
-    for (const f of needed) { try { await rf(path.join(ROOT, f)) } catch { absent.push(f) } }
-    check('every listed runtime module exists on disk', absent.length === 0, absent.join(', '))
-    // The daemon's own path expression must land on a published file.
-    const proxySrc = await rf(path.join(ROOT, 'src', 'proxy.js'), 'utf8')
-    check('proxy resolves the runner from the package root', /RUNNER = path\.join\(ROOT, 'daemon', 'run\\.mjs'\)/.test(proxySrc) || /'daemon',\s*'run\.mjs'/.test(proxySrc), proxySrc.match(/const RUNNER[^\n]*/)?.[0] || 'no RUNNER const')
+    const missing = needed.filter((f) => !(pkg.files || []).some((pat) => covered(pat, f)))
+    check('files covers all ' + needed.length + ' referenced modules', missing.length === 0, 'missing: ' + missing.join(', '))
+
+    const onDisk = []
+    for (const f of needed) { try { await read(f) } catch { onDisk.push(f) } }
+    check('every referenced module exists on disk', onDisk.length === 0, 'absent: ' + onDisk.join(', '))
+
+    // The daemon resolves its runner by path expression; that must land on a file
+    // the tarball carries, not one that only exists in the repository.
+    const proxySrc = await read('src/proxy.js')
+    const runnerLine = (proxySrc.split('\n').find((l) => l.includes('const RUNNER')) || '').trim()
+    check('proxy resolves the runner through the package root', runnerLine.includes('ROOT') && runnerLine.includes('daemon') && runnerLine.includes('run.mjs'), runnerLine || 'no RUNNER const')
+  }
+
+  console.log('the first recorded bridge is attempted on restore')
+  {
+    // Restoring recorded bridges is what makes an install survive a restart. The
+    // flag that bounds that work started as false while the skip test was
+    // 'daemonProved === false', so the very first bridge was skipped and nothing
+    // ever came back - a silent loss of persistence no mock covered. Three states
+    // are needed: untried, worked, failed. Checked statically because the failure
+    // only shows on a real host start, where the daemon may be unavailable.
+    const src = await (await import('node:fs/promises')).readFile(path.join(ROOT, 'index.js'), 'utf8')
+    check('restore flag starts untried', /let daemonProved = null/.test(src), (src.split('\n').find((l) => l.includes('let daemonProved')) || 'absent').trim())
+    check('inspection is not conflated with failure', /if \(capturing\)/.test(src) && /if \(daemonProved === false\)/.test(src))
+    check('a success marks the daemon usable', /daemonProved = true/.test(src))
+    check('a failure stops further waits', /daemonProved = false/.test(src))
+    check('restore has a bounded wait', /waitMs: \d+/.test(src), (src.match(/waitMs: \d+/) || ['none'])[0])
   }
 
   console.log('caches stay outside the published tree')

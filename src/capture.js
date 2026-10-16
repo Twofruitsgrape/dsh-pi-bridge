@@ -296,6 +296,19 @@ export async function capturePi (files, origin) {
  * @param {any} config
  */
 export async function captureDsh (entry, origin, config) {
+  // A bundle being *analysed* must not run the things it does at load in a real
+  // host: starting a daemon or opening a port are side effects, and captureDsh
+  // calls apply() on a stand-in scope. The entry checks this marker.
+  const prior = process.env.DSH_PI_BRIDGE_CAPTURING
+  process.env.DSH_PI_BRIDGE_CAPTURING = '1'
+  try { return await captureDshInner(entry, origin, config) }
+  finally {
+    if (prior === undefined) delete process.env.DSH_PI_BRIDGE_CAPTURING
+    else process.env.DSH_PI_BRIDGE_CAPTURING = prior
+  }
+}
+
+async function captureDshInner (entry, origin, config) {
   const bag = createDshRecorder(origin)
   const errors = []
   try {
