@@ -232,8 +232,13 @@ export async function installDependencies (dir, log) {
 
   const nm = path.join(dir, 'node_modules')
   await purgePlaceholders(nm, deps)
-  const present = await readdir(nm).then((e) => e.filter((n) => !n.startsWith('.') && !n.startsWith('_')).length).catch(() => 0)
-  if (present >= deps.length) {
+  // Counting top-level entries is not evidence that the dependencies are there.
+  // A scoped name occupies a single directory, so two @scope/* dependencies read as
+  // one present entry, and the forwarding package written below adds another - the
+  // combination let a half-installed bundle look complete and skip the install,
+  // which a live load then reported as a missing package. Ask for each name.
+  const missing = await missingDependencies(nm, deps)
+  if (!missing.length) {
     // The warm-cache path has to write the forwarding package too: skipping it
     // made a bundle that imports itself load once and fail on every reload.
     await ensureSelfReference(dir, note)
@@ -251,11 +256,53 @@ export async function installDependencies (dir, log) {
     child.on('close', (c) => { clearTimeout(timer); done(c) })
   })
 
-  const after = await readdir(nm).then((e) => e.filter((n) => !n.startsWith('.') && !n.startsWith('_')).length).catch(() => 0)
+  let stillMissing = await missingDependencies(nm, deps)
+  // A bridge cache copy can arrive with npm state from an earlier build (its
+  // .package-lock.json). npm then reconciles that tree instead of installing what
+  // the manifest asks for, exited 0, and left one declared dependency absent - so
+  // a plain second pass has to name the missing packages rather than trust the
+  // lockfile's idea of "up to date".
+  if (stillMissing.length) {
+    note('npm left ' + stillMissing.join(', ') + ' out; installing those by name')
+    const retry = await new Promise((done) => {
+      const isWin = process.platform === 'win32'
+      const c = spawn('npm', ['install', '--no-save', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps', ...stillMissing], { cwd: dir, stdio: 'ignore', shell: isWin, windowsHide: true })
+      const timer = setTimeout(() => { try { c.kill() } catch { /* gone */ } }, 300000)
+      c.on('error', (e) => { clearTimeout(timer); done('spawn:' + (e && e.code)) })
+      c.on('close', (n) => { clearTimeout(timer); done(n) })
+    })
+    stillMissing = await missingDependencies(nm, deps)
+    if (stillMissing.length) note('retry (npm ' + retry + ') still missing: ' + stillMissing.join(', '))
+  }
   await ensureSelfReference(dir, note)
-  if (code === 0) return { status: 'installed', count: deps.length, reason: after + ' dirs' }
-  if (after > 0) return { status: 'partial', count: deps.length, reason: 'npm exited ' + code + ', ' + after + ' dirs present' }
+  if (!stillMissing.length) return { status: 'installed', count: deps.length, reason: 'all present by name' }
+  if (stillMissing.length < deps.length) {
+    return { status: 'partial', count: deps.length, reason: 'npm exited ' + code + ', missing ' + stillMissing.join(', ') }
+  }
   return { status: 'failed', count: deps.length, reason: 'npm exited ' + code }
+}
+
+/**
+ * Which declared dependencies are not actually installed.
+ *
+ * A directory is not enough: it must carry a package.json with the expected name,
+ * so a stray folder or an empty scope directory does not read as satisfied.
+ *
+ * @param {string} nm node_modules directory
+ * @param {string[]} deps declared dependency names
+ */
+export async function missingDependencies (nm, deps) {
+  const missing = []
+  for (const dep of deps) {
+    try {
+      const inner = JSON.parse(await readFile(path.join(nm, ...String(dep).split('/'), 'package.json'), 'utf8'))
+      if (inner && inner.name) continue
+      missing.push(dep)
+    } catch {
+      missing.push(dep)
+    }
+  }
+  return missing
 }
 
 /**

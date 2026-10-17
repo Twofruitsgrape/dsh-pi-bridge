@@ -481,10 +481,26 @@ export async function apply (ctx, config) {
         if (!entry) return { ok: false, error: 'not loaded in this DSH session: ' + name }
         if (typeof entry.def.execute !== 'function') return { ok: false, error: 'tool has no execute' }
         try {
-          // The host passes a per-call execution object; a remote call has none, so
-          // an empty one stands in. Tools that need host services beyond ctx will
-          // report that themselves, and the caller sees a real error, not a fake ok.
-          const out = await entry.def.execute(args || {}, { })
+          // The host hands a tool an execution context (callId, signal, and the
+          // calling agent's scope). A remote HTTP call has no agent turn behind it,
+          // and agent must not be fabricated: a tool that dispatches subagents or
+          // writes session state under a fake identity is worse than one that
+          // refuses. So this carries what is genuinely available - an identity for
+          // the call and a real abort signal - and leaves agent undefined, so a
+          // tool's own guard produces its own clear message ('requires a live DSH
+          // agent', measured) instead of a TypeError from reading exec.signal.
+          const controller = new AbortController()
+          const exec = {
+            callId: 'dsh-pi-bridge:' + name + ':' + Date.now().toString(36),
+            name,
+            arguments: args || {},
+            signal: controller.signal,
+            agent: undefined,
+          }
+          const timer = setTimeout(() => controller.abort(), 120000)
+          let out
+          try { out = await entry.def.execute(args || {}, exec) }
+          finally { clearTimeout(timer) }
           return { ok: true, result: out }
         } catch (e) {
           return { ok: false, error: String((e && e.message) || e).slice(0, 300) }

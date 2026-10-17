@@ -575,6 +575,50 @@ async function main () {
     check('fileURLToPath is imported where used', missingImport.length === 0, missingImport.join(', '))
   }
 
+  console.log('scoped dependencies are checked by name')
+  {
+    // 'How many top-level entries does node_modules have' is not evidence that the
+    // declared dependencies are installed: two @scope/* packages occupy ONE
+    // directory, so a package declaring both appeared half-installed yet "complete"
+    // and the install was skipped - a live load then reported the second one
+    // missing. Check names, and require a package.json that carries one.
+    const { missingDependencies } = await import('../src/resolve.js')
+    const root = path.join(HOME, 'fixtures', 'scoped-deps')
+    const nm = path.join(root, 'node_modules')
+    await mkdir(path.join(nm, '@acme', 'alpha'), { recursive: true })
+    await writeFile(path.join(nm, '@acme', 'alpha', 'package.json'), JSON.stringify({ name: '@acme/alpha', version: '1.0.0' }))
+    // One scoped package present, the other absent: entry counting saw "1 of 2",
+    // close enough to pass, which is exactly the bug.
+    const deps = ['@acme/alpha', '@acme/beta', 'plainpkg']
+    const missing = await missingDependencies(nm, deps)
+    check('scoped sibling reported missing', missing.includes('@acme/beta'), JSON.stringify(missing))
+    check('installed scoped package not reported', !missing.includes('@acme/alpha'), JSON.stringify(missing))
+    check('uninstalled plain package reported', missing.includes('plainpkg'), JSON.stringify(missing))
+    // A directory without a package.json is not an installed package.
+    await mkdir(path.join(nm, 'hollow'), { recursive: true })
+    const m2 = await missingDependencies(nm, ['hollow'])
+    check('a directory alone is not a dependency', m2.includes('hollow'), JSON.stringify(m2))
+    // A package.json without a name is not one either.
+    await mkdir(path.join(nm, 'noname'), { recursive: true })
+    await writeFile(path.join(nm, 'noname', 'package.json'), '{"version":"1.0.0"}')
+    const m3 = await missingDependencies(nm, ['noname'])
+    check('an unnamed package.json is not a dependency', m3.includes('noname'), JSON.stringify(m3))
+    // And a complete set reports nothing missing.
+    await mkdir(path.join(nm, '@acme', 'beta'), { recursive: true })
+    await writeFile(path.join(nm, '@acme', 'beta', 'package.json'), JSON.stringify({ name: '@acme/beta' }))
+    await mkdir(path.join(nm, 'plainpkg'), { recursive: true })
+    await writeFile(path.join(nm, 'plainpkg', 'package.json'), JSON.stringify({ name: 'plainpkg' }))
+    const m4 = await missingDependencies(nm, ['@acme/alpha', '@acme/beta', 'plainpkg'])
+    check('a full set reports nothing missing', m4.length === 0, JSON.stringify(m4))
+    // The install decision must consult names, not entry counts.
+    const src = await (await import('node:fs/promises')).readFile(path.join(ROOT, 'src', 'resolve.js'), 'utf8')
+    check('install decision uses names', /const missing = await missingDependencies\(nm, deps\)/.test(src))
+    // Reassigned because a retry may clear the list, so the declaration keyword
+    // varies; what the rule requires is that the decision reads names.
+    check('post-install recheck uses names', /stillMissing = await missingDependencies\(nm, deps\)/.test(src))
+    check('no entry-count shortcut left', !/present >= deps.length/.test(src))
+  }
+
   console.log('a split bundle resolves its own name')
   {
     // dsh-mnemon's providers each \`import "dsh-mnemon"\`. Installed by the plugin
