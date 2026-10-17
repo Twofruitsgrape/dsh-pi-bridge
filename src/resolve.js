@@ -12,7 +12,7 @@
  *
  * @module src/resolve.js
  */
-import { mkdir, rm, cp, readFile, writeFile, readdir, lstat, realpath } from 'node:fs/promises'
+import { mkdir, rename, rm, cp, readFile, writeFile, readdir, lstat, realpath } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import os from 'node:os'
@@ -73,7 +73,24 @@ export async function resolve (spec, options) {
     if (options && options.cacheOnly) throw new Error('not in bridge cache')
   }
   await mkdir(PACKAGES_DIR, { recursive: true })
-  await rm(dest, { recursive: true, force: true })
+  /**
+   * A refresh must survive a cache copy that cannot be deleted.
+   *
+   * On Windows a directory stops being deletable the moment another process has
+   * read files out of it - and the pi daemon loads packages from exactly this
+   * directory, then stays alive. So refreshing an installed package threw
+   * EBUSY and the whole install failed: the user could not reinstall anything
+   * while the daemon was up, which is whenever the daemon was up. Retire the
+   * locked copy under a new name and fetch into a fresh directory instead.
+   */
+  try {
+    await rm(dest, { recursive: true, force: true })
+  } catch (e) {
+    if (!e || e.code !== 'EBUSY') throw e
+    const retired = dest + '.stale-' + Date.now()
+    try { await rename(dest, retired); log('previous copy was locked; moved aside as ' + path.basename(retired)) }
+    catch (mv) { throw new Error('cannot replace the cached copy of this package (' + (mv && mv.code) + '); stop the pi daemon (bridge_status shows its pid) and retry') }
+  }
   await mkdir(dest, { recursive: true })
   switch (source.type) {
     case 'npm': await fromNpm(source.id, dest, log); break

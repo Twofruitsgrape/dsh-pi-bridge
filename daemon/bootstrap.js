@@ -273,14 +273,19 @@ function startServer (pi) {
           const { root } = JSON.parse(raw || '{}')
           if (!root) return json(res, 200, { ok: false, error: 'no package root given' })
           const owner = path.basename(String(root).replace(/[\\/]+$/, ''))
+          // Declared before the load: these are const bindings, and referring to
+          // them from inside loadPackage while the declaration sat below threw
+          // "Cannot access 'pkgErrors' before initialization" - every /load failed
+          // for every package. A textual assertion that only looked for the names
+          // passed happily on the broken file, which is why this needed a real call.
+          const pkgErrors = []
+          const pkgNotes = []
           await loadPackage(root, pi, pkgErrors, pkgNotes)
           // Report every tool this package owns, not just the ones that appeared:
           // the daemon outlives a single DSH call, so a package loaded by an
           // earlier preview or install contributes nothing new yet is still
           // perfectly callable. Reporting only the delta made an idempotent
           // reinstall look like a package with no capabilities.
-          const pkgErrors = []
-          const pkgNotes = []
           const owned = [...recorded.entries()].filter(([, e]) => e.origin === owner)
           return json(res, 200, {
             ok: true,

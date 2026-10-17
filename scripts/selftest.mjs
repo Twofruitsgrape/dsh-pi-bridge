@@ -785,6 +785,17 @@ async function main () {
     // entirely from bridge_status.
     const health = src.slice(src.indexOf("if (url === '/health')"), src.indexOf("if (url === '/health')") + 400)
     check('health still reports load errors', /loadErrors/.test(health), health.replace(/\s+/g, ' ').slice(0, 200))
+    // The exact invariant a textual check missed: the sinks are const bindings,
+    // so declaring them below the call that passes them threw "Cannot access
+    // 'pkgErrors' before initialization" and made EVERY /load fail - while the
+    // checks above, which only looked for the names, stayed green. Order, not
+    // presence, is what matters here.
+    const loadBranch = src.slice(src.indexOf("if (url === '/load')"), src.indexOf("if (url === '/call')"))
+    const declPos = loadBranch.indexOf('const pkgErrors = []')
+    const usePos = loadBranch.indexOf('await loadPackage(root, pi, pkgErrors')
+    check('declared before the load that uses them', declPos >= 0 && usePos >= 0 && declPos < usePos,
+      'decl=' + declPos + ' use=' + usePos)
+    check('no second declaration of the sinks', (loadBranch.match(/const pkgErrors = \[\]/g) || []).length === 1)
   }
 
   console.log('an install failure names npm reason')
@@ -831,6 +842,56 @@ async function main () {
     check('the bridge names the missing declared entry', /declared entry not in package/.test(boot))
     check('it reads the package own declaration, not the filtered list',
       /declared = \(\(pkg\.pi && pkg\.pi\.extensions\) \|\| \[\]\)/.test(boot))
+  }
+
+  console.log('a stale daemon is replaced and a failed load is raised')
+  {
+    // Two ways this bridge lied by omission. A daemon that outlives an upgrade
+    // answers health with the OLD code loaded, so a verification run measures the
+    // previous build - that is exactly what happened here, where a batch reported
+    // 'nothing callable' for packages a direct daemon query had just loaded fine.
+    // And loadIntoPi read only the plural errors array, so a refusal (reported as
+    // { ok: false, error }) surfaced as a successful load with zero tools.
+    const { isStaleDaemon } = await import('../src/proxy.js')
+    const { buildFingerprint } = await import('../src/build-id.js')
+    // Behaviour, not text: a version string cannot detect a code change (it stays
+    // put while the code is edited under it), so the daemon stamps a digest of the
+    // modules it runs. Two fixtures with different bytes prove the digest is
+    // sensitive to an edit, which is the whole point - and that a check which only
+    // looked for the identifier 'BRIDGE_VERSION' could never show.
+    const here = buildFingerprint(ROOT)
+    check('the bridge fingerprints its own code', typeof here === 'string' && here.length === 12, String(here))
+    check('a matching stamp is fresh', isStaleDaemon({ ok: true, bridgeVersion: here }) === false)
+    check('a mismatched stamp is stale', isStaleDaemon({ ok: true, bridgeVersion: 'older1234567' }) === true)
+    check('an unstampéd daemon is treated as stale', isStaleDaemon({ ok: true }) === true, 'bridgeVersion undefined')
+    check('a dead daemon is not called stale', isStaleDaemon({ ok: false }) === false)
+    check('a missing code root yields no digest', buildFingerprint(path.join(HOME, 'no-such-root')) === null)
+    const fixed = path.join(HOME, 'fixtures', 'digest')
+    await mkdir(path.join(fixed, 'a'), { recursive: true })
+    await mkdir(path.join(fixed, 'b'), { recursive: true })
+    await mkdir(path.join(fixed, 'c'), { recursive: true })
+    await writeFile(path.join(fixed, 'a', 'index.js'), 'export const v = 1', 'utf8')
+    await writeFile(path.join(fixed, 'b', 'index.js'), 'export const v = 2', 'utf8')
+    await writeFile(path.join(fixed, 'c', 'index.js'), 'export const v = 1', 'utf8')
+    const da = buildFingerprint(path.join(fixed, 'a'))
+    const db = buildFingerprint(path.join(fixed, 'b'))
+    const dc = buildFingerprint(path.join(fixed, 'c'))
+    check('an edit changes the digest', !!da && !!db && da !== db, da + ' vs ' + db)
+    check('identical code digests the same', dc === da, dc + ' vs ' + da)
+    check('the daemon stamps health with the digest', await (async () => {
+      const src = await (await import('node:fs/promises')).readFile(path.join(ROOT, 'daemon', 'run.mjs'), 'utf8')
+      return src.includes('out.bridgeVersion = BRIDGE_VERSION')
+        && src.includes('BRIDGE_VERSION = buildFingerprint(') && src.includes("from '../src/build-id.js'")
+    })())
+    check('loadIntoPi raises a refusal', await (async () => {
+      const src = await (await import('node:fs/promises')).readFile(path.join(ROOT, 'src', 'proxy.js'), 'utf8')
+      return /reply\.ok === false && reply\.error/.test(src) && src.includes('pi could not load the package')
+    })())
+    // The plural array must still be reported, or per-file problems go silent.
+    check('per-file errors still surface in the report', await (async () => {
+      const src = await (await import('node:fs/promises')).readFile(path.join(ROOT, 'index.js'), 'utf8')
+      return /loaded\.errors && loaded\.errors\.length/.test(src)
+    })())
   }
 
   console.log('caches stay outside the published tree')

@@ -19,12 +19,21 @@ import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { resolve as resolveSource, installDependencies, CACHE_ROOT } from './resolve.js'
 import { classify, piEntries } from './manifest.js'
+import { buildFingerprint } from './build-id.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
 const RUNNER = path.join(ROOT, 'daemon', 'run.mjs')
 const PORT = Number(process.env.DSH_PI_BRIDGE_DAEMON_PORT || 43117)
 const LOG = path.join(CACHE_ROOT, 'daemon.log')
+
+/**
+ * This bridge's own version, so a daemon left running by an older build can be
+ * recognised. The daemon is deliberately long-lived (it survives a host restart),
+ * which means after an upgrade it would answer health happily while executing the
+ * previous version's code - and any verification run would test the wrong build.
+ */
+const OUR_VERSION = buildFingerprint(ROOT)
 
 let child = null
 let starting = null
@@ -110,12 +119,32 @@ export function daemonLaunch (env = process.env, platform = process.platform, is
  *        here, waiting 45 seconds per bridge would stall the host for minutes
  *        before the first message, and the user can still install explicitly.
  */
+/** True when the daemon reports a bridge version other than this one. */
+export function isStaleDaemon (reply, ourVersion = OUR_VERSION) {
+  if (!reply || !reply.ok) return false
+  // A reply with no stamp predates fingerprinting at all, so it is certainly older.
+  if (!ourVersion) return false
+  return reply.bridgeVersion !== ourVersion
+}
+
+/** Ask a running daemon to exit so this build can start in its place. */
+async function retireDaemon (log, h) {
+  log('restarting the pi daemon: it runs bridge ' + (h.bridgeVersion || 'unversioned') + ', this is ' + OUR_VERSION)
+  try { await request('GET', '/shutdown', null, 8000) } catch { /* already gone */ }
+  for (let i = 0; i < 24; i++) {
+    await new Promise((r) => setTimeout(r, 500))
+    // Port free again: the old process is gone.
+    try { await health(1500) } catch { return }
+  }
+}
+
 export async function ensureDaemon (options) {
   const log = (options && options.log) || (() => {})
   const budgetMs = Math.max(2000, Number((options && options.waitMs) || 45000))
   try {
     const h = await health()
-    if (h && h.ok) return h
+    if (h && h.ok && !isStaleDaemon(h)) return h
+    if (h && h.ok) await retireDaemon(log, h)
   } catch { /* not running */ }
   if (starting) return starting
   starting = (async () => {
@@ -204,7 +233,18 @@ export async function loadIntoPi (materialized, options) {
     throw new Error('refusing to load: dependencies failed (' + materialized.dependencies.reason + ')')
   }
   await ensureDaemon({ log, waitMs })
-  return request('POST', '/load', { root }, 60000)
+  const reply = await request('POST', '/load', { root }, 60000)
+  /*
+   * A failed load must not look like a successful load that found nothing.
+   *
+   * The daemon reports a refusal as { ok: false, error } - singular - while the
+   * plural errors array holds per-file problems from a load that did succeed.
+   * Callers only read the plural one, so every refusal came back as "zero tools"
+   * and moved on: two published packages were written off as having nothing to
+   * contribute while pi had actually refused them outright.
+   */
+  if (reply && reply.ok === false && reply.error) throw new Error('pi could not load the package: ' + reply.error)
+  return reply
 }
 
 /**

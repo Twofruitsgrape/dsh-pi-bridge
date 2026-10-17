@@ -21,6 +21,24 @@ import os from "node:os"
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, "..")
 const HOME = path.join(ROOT, ".tmp", "batch-pi")
+/*
+ * Retire a daemon left over from an earlier run before wiping its cache.
+ *
+ * On Windows a directory whose files another process has opened cannot be
+ * deleted, and the pi daemon loads packages from exactly this tree and stays
+ * alive between runs. Wiping it first threw EBUSY and killed the harness before
+ * it reached any package - so a leftover daemon from a previous batch turned the
+ * next batch into a crash rather than a test.
+ */
+{
+  const http = await import("node:http")
+  const stop = () => new Promise((done) => {
+    const req = http.request({ host: "127.0.0.1", port: 43211, path: "/shutdown", method: "GET", agent: false, timeout: 6000 }, (r) => { r.resume(); r.on("end", done) })
+    req.on("error", done); req.on("timeout", () => { req.destroy(); done() }); req.end()
+  })
+  await stop()
+  await new Promise((r) => setTimeout(r, 3000))
+}
 await rm(HOME, { recursive: true, force: true })
 await mkdir(HOME, { recursive: true })
 process.env.DSH_PI_BRIDGE_HOME = HOME

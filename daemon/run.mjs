@@ -19,6 +19,7 @@ import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import os from 'node:os'
+import { buildFingerprint } from '../src/build-id.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
@@ -137,6 +138,13 @@ async function forward (reqPath, body) {
   return res.json()
 }
 
+/**
+ * Fingerprint of the bridge code this daemon is executing. A version string would
+ * not do - it does not change while the code is edited under it - so this is the
+ * bytes of the modules themselves. See src/build-id.js.
+ */
+const BRIDGE_VERSION = buildFingerprint(path.join(HERE, '..'))
+
 const server = createServer((req, res) => {
   let raw = ''
   req.on('data', (c) => { raw += c })
@@ -154,6 +162,13 @@ const server = createServer((req, res) => {
       }
       const body = raw ? JSON.parse(raw) : null
       const out = await forward(p, body)
+      // /health is answered by the bootstrap inside pi, so the daemon stamps its
+      // own bridge version onto the reply. A daemon outlives a DSH restart and an
+      // upgrade: without a version it looks healthy while running the previous
+      // build's code - which is exactly how a "verified" run here exercised code
+      // that had already been fixed. The client compares it and restarts a stale
+      // daemon rather than trusting a healthy-looking one.
+      if (p === '/health' && out && typeof out === 'object') out.bridgeVersion = BRIDGE_VERSION
       if (p === '/call' && out && out.ok) out.dialogs = dialogs.slice(-3)
       res.end(JSON.stringify(out))
     } catch (e) {
