@@ -23,7 +23,7 @@ import os from 'node:os'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
 const TMP = path.join(ROOT, '.tmp', 'batch-dsh')
-const { mkdir, appendFile, writeFile } = await import('node:fs/promises')
+const { mkdir, appendFile, writeFile, readFile } = await import('node:fs/promises')
 await mkdir(TMP, { recursive: true })
 const JOURNAL = path.join(TMP, 'journal.txt')
 await writeFile(JOURNAL, '')
@@ -50,44 +50,59 @@ if (!(health && health.ok && health.serve)) {
 }
 await log('live DSH session: pid=' + health.pid)
 
-// Where to look: the user's own profile by default, or a directory given on the
-// command line, so third-party packages pulled from npm can be tested the same
-// way. A JSON file of explicit paths is also accepted.
-const arg = process.argv[2] || ''
+// What to load. Three shapes, all resolved by the product path (the bridge's own
+// resolver: npm tarball, shallow git clone, or a local directory copy):
+//   (nothing)        the default list of this machine's own bundles
+//   a JSON file      an array of specs, e.g. ["npm:dsh-pet", "github:owner/repo"]
+//   a directory      every bundle installed under it
+const DEFAULT_BUNDLES = [
+  'dsh-super-code',
+  'dsh-gitbash-shell',
+  'dsh-expert-orchestrator',
+  'dsh-thinking-levels',
+  'dshmarket',
+  'dsh-computer-use-win',
+  'dsh-our-free-model',
+  'dsh-comsol',
+]
 let resolved = []
+const arg = process.argv[2] || ''
 if (arg.endsWith('.json')) {
-  const { readFile } = await import('node:fs/promises')
-  const list = JSON.parse(await readFile(arg, 'utf8'))
-  const listed = []
-  for (const p of list) {
-    const dir = path.resolve(p)
-    let name = path.basename(dir)
-    try { const { readFileSync } = await import('node:fs'); name = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8')).name || name } catch { /* fall back */ }
-    if (existsSync(path.join(dir, 'package.json'))) listed.push({ name, dir })
+  const specs = JSON.parse(await readFile(arg, 'utf8'))
+  // A spec that is a local path is named by its directory; an npm:/git: spec by
+  // its package name, so the report reads the same either way.
+  resolved = specs.map((s) => {
+    const spec = String(s).replace(/\\/g, '/')
+    // npm:@scope/name@1.2.3 -> @scope/name. Splitting on '@' would return an
+    // empty string for a scoped package, so cut the version at the last '@' only
+    // when one follows the name.
+    let name = spec
+    if (name.includes(':') && !name.includes(':/')) name = name.slice(name.indexOf(':') + 1)
+    else name = path.basename(name)
+    const at = name.lastIndexOf('@')
+    if (at > 0) name = name.slice(0, at)
+    return { name, spec }
+  })
+} else if (arg) {
+  const root = path.resolve(arg)
+  for (const name of readdirSync(root)) {
+    const dir = path.join(root, name)
+    try { if (!statSync(dir).isDirectory()) continue } catch { continue }
+    if (!existsSync(path.join(dir, 'package.json'))) continue
+    resolved.push({ name, spec: dir.replace(/\\/g, '/') })
   }
-  resolved = listed
 } else {
-  const root = arg ? path.resolve(arg) : path.join(os.homedir(), '.dsh', 'profiles', 'desktop', 'node_modules')
-  for (const name of BUNDLES) {
+  const root = path.join(os.homedir(), '.dsh', 'profiles', 'desktop', 'node_modules')
+  for (const name of DEFAULT_BUNDLES) {
     const dir = path.join(root, name)
     if (!existsSync(path.join(dir, 'package.json'))) { await log('absent locally: ' + name); continue }
-    resolved.push({ name, dir })
-  }
-  // An explicit directory listing beats the default names when the root is not the
-  // user profile: whatever bundles live there get tested.
-  if (!arg.endsWith('.json') && root !== path.join(os.homedir(), '.dsh', 'profiles', 'desktop', 'node_modules') && !resolved.length) {
-    for (const name of readdirSync(root)) {
-      const dir = path.join(root, name)
-      try { if (!statSync(dir).isDirectory()) continue } catch { continue }
-      if (existsSync(path.join(dir, 'package.json'))) resolved.push({ name, dir })
-    }
+    resolved.push({ name, spec: dir.replace(/\\/g, '/') })
   }
 }
 await log('bundles found: ' + resolved.map((r) => r.name).join(', '))
 
 const rows = []
-for (const { name, dir } of resolved) {
-  const spec = dir.replace(/\\/g, '/')
+for (const { name, spec } of resolved) {
   await log('\n### ' + name)
   const start = Date.now()
   let loaded

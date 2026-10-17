@@ -34,21 +34,26 @@ const npmBin = path.join(os.homedir(), "AppData", "Roaming", "npm")
 const hasPi = existsSync(path.join(npmBin, "pi.cmd")) || existsSync(path.join(npmBin, "pi")) || existsSync("/usr/local/bin/pi")
 if (!hasPi) { await log("SKIP: no pi CLI on this machine"); process.exit(0) }
 
-const SPECS = [
-  "npm:pi-web-search",          // search tools, small
-  "npm:pi-memory",              // memory/persistence tools
-  "npm:pi-goal-x",              // goal tracking
-  "npm:@narumitw/pi-usage",     // usage reporting
-  "npm:pi-simplify",            // refactor command
-  "npm:pi-background-tasks",    // background job tools
-  "npm:pi-mcp-adapter",         // MCP bridge, heavier
-  "npm:pi-subagents",           // 3 tools + many commands (known shape)
-  "npm:@juicesharp/rpiv-todo",  // scoped package, todo tools
-  "npm:context-mode",           // large: exercises mirror + deps
-  "npm:billion-context",        // large: exercises mirror + deps
-  "npm:pi-powerline-footer",    // TUI-only on purpose: should report nothing
+/**
+ * Packages to try. Defaults to the first wave already validated; a JSON file of
+ * specs (one npm:/git: string per element) may be given so a fresh batch of real
+ * published packages can be run without editing this file:
+ *   node tools/batch-pi-to-dsh.mjs .tmp/pi-list.json
+ */
+const DEFAULT_SPECS = [
+  'npm:pi-web-search',
+  'npm:pi-memory',
+  'npm:pi-goal-x',
 ]
-const LIMIT = Number(process.argv[2] || SPECS.length)
+let SPECS = DEFAULT_SPECS
+if (process.argv[2] && process.argv[2].endsWith('.json')) {
+  const { readFile: rf } = await import('node:fs/promises')
+  SPECS = JSON.parse(await rf(process.argv[2], 'utf8'))
+}
+const LIMIT = process.argv[2] && process.argv[2].endsWith('.json')
+  ? SPECS.length
+  : Number(process.argv[2] || SPECS.length)
+
 
 // The same recording stand-in the DSH-side suite uses, so this is the host path
 // and not a bespoke mock.

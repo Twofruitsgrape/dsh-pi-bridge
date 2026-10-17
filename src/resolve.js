@@ -247,14 +247,65 @@ export async function installDependencies (dir, log) {
 
   const args = ['install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps']
   note('npm install (' + deps.length + ' dependencies) in ' + path.basename(dir))
-  const code = await new Promise((done) => {
+  /**
+   * Run the install, keeping the tail of npm's own output.
+   *
+   * stdio was discarded, so a failed install could only ever be reported as
+   * 'npm exited 1' - and npm's exit code is rarely the reason. What the user and
+   * I needed was the line saying ERESOLVE, or ENOTFOUND, or which package 404s.
+   * A large dependency tree also gets killed by the budget below (12 packages of
+   * langchain/qdrant/deepagents did), and without a named cause that looks like a
+   * broken bridge rather than a slow install.
+   */
+  // Measured: npm took 6 minutes for one published pi package's tree
+  // (langchain + langgraph + qdrant + deepagents, 180 packages). A five-minute
+  // budget made that install fail by construction, so the default covers the
+  // slowest tree actually observed here rather than a round number.
+  const INSTALL_BUDGET_MS = Number(process.env.DSH_PI_BRIDGE_INSTALL_MS || 900000)
+  /**
+   * Run one npm install, keeping the tail of its output.
+   *
+   * Both passes need the same thing: npm's exit code is rarely the reason, and
+   * the first version of this captured output for the initial install only, which
+   * the self-test caught as a leftover stdio: 'ignore' on the retry.
+   *
+   * @param {string[]} npmArgs
+   * @param {number} budgetMs
+   */
+  const npmRun = (npmArgs, budgetMs) => new Promise((done) => {
     const isWin = process.platform === 'win32'
     // npm is a .cmd shim on Windows: spawning it without a shell is EINVAL.
-    const child = spawn('npm', args, { cwd: dir, stdio: 'ignore', shell: isWin, windowsHide: true })
-    const timer = setTimeout(() => { try { child.kill() } catch { /* gone */ } }, 300000)
-    child.on('error', (e) => { clearTimeout(timer); done('spawn:' + (e && e.code)) })
-    child.on('close', (c) => { clearTimeout(timer); done(c) })
+    const child = spawn('npm', npmArgs, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], shell: isWin, windowsHide: true })
+    let tail = ''
+    const keep = (chunk) => { tail = (tail + String(chunk)).slice(-1400) }
+    child.stdout.on('data', keep)
+    child.stderr.on('data', keep)
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      try { child.kill() } catch { /* gone */ }
+    }, budgetMs)
+    child.on('error', (e) => { clearTimeout(timer); done({ code: 'spawn:' + (e && e.code), tail, timedOut }) })
+    child.on('close', (c) => { clearTimeout(timer); done({ code: c, tail, timedOut }) })
   })
+  const install = await npmRun(args, INSTALL_BUDGET_MS)
+  const code = install.code
+  /**
+   * What to append to a failure reason so it names a cause.
+   *
+   * 'npm exited null' told a user nothing. null means killed, and what killed it
+   * was this module's own budget - that has to be said, because the bridge is the
+   * thing that gave up, not the registry. Otherwise the last few npm lines are the
+   * useful part, since npm's exit code is rarely the reason.
+   */
+  const suffix = (info) => {
+    const bits = []
+    if (info.timedOut) bits.push('killed after ' + Math.round(INSTALL_BUDGET_MS / 1000) + 's (raise DSH_PI_BRIDGE_INSTALL_MS for a large dependency tree)')
+    const why = (info.tail || '').split('\n').map((l) => l.trim()).filter((l) => l && !/npm warn|trace-warnings|ExperimentalWarning/.test(l)).slice(-2).join(' | ')
+    if (why) bits.push('npm said: ' + why.slice(0, 220))
+    return bits.length ? ' (' + bits.join('; ') + ')' : ''
+  }
+
 
   let stillMissing = await missingDependencies(nm, deps)
   // A bridge cache copy can arrive with npm state from an earlier build (its
@@ -264,22 +315,16 @@ export async function installDependencies (dir, log) {
   // lockfile's idea of "up to date".
   if (stillMissing.length) {
     note('npm left ' + stillMissing.join(', ') + ' out; installing those by name')
-    const retry = await new Promise((done) => {
-      const isWin = process.platform === 'win32'
-      const c = spawn('npm', ['install', '--no-save', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps', ...stillMissing], { cwd: dir, stdio: 'ignore', shell: isWin, windowsHide: true })
-      const timer = setTimeout(() => { try { c.kill() } catch { /* gone */ } }, 300000)
-      c.on('error', (e) => { clearTimeout(timer); done('spawn:' + (e && e.code)) })
-      c.on('close', (n) => { clearTimeout(timer); done(n) })
-    })
+    const retry = await npmRun(['install', '--no-save', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps', ...stillMissing], INSTALL_BUDGET_MS)
     stillMissing = await missingDependencies(nm, deps)
-    if (stillMissing.length) note('retry (npm ' + retry + ') still missing: ' + stillMissing.join(', '))
+    if (stillMissing.length) note('retry (npm ' + retry.code + ') still missing: ' + stillMissing.join(', ') + suffix(retry))
   }
   await ensureSelfReference(dir, note)
   if (!stillMissing.length) return { status: 'installed', count: deps.length, reason: 'all present by name' }
   if (stillMissing.length < deps.length) {
-    return { status: 'partial', count: deps.length, reason: 'npm exited ' + code + ', missing ' + stillMissing.join(', ') }
+    return { status: 'partial', count: deps.length, reason: 'npm exited ' + code + ', missing ' + stillMissing.join(', ') + suffix(install) }
   }
-  return { status: 'failed', count: deps.length, reason: 'npm exited ' + code }
+  return { status: 'failed', count: deps.length, reason: 'npm exited ' + code + suffix(install) }
 }
 
 /**

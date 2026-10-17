@@ -745,6 +745,94 @@ async function main () {
   }
   }
 
+  console.log('a renamed host module still resolves for a package')
+  {
+    // pi publishes typebox, but packages keep importing the old
+    // '@sinclair/typebox' name - @ff-labs/pi-fff did, on a real run, and failed
+    // with 'Cannot find module @sinclair/typebox' while typebox sat in the same
+    // node_modules. pi's own alias table maps both names, so mirroring it has to
+    // map both as well.
+    const { buildAliasTable } = await import('../src/pi-aliases.js')
+    const piDir = process.env.DSH_PI_BRIDGE_TEST_PI_DIR
+    if (!piDir) {
+      check('legacy alias test skipped without a pi install', true)
+    } else {
+      const t = buildAliasTable(piDir)
+      check('no alias gaps against the real pi install', t.missing.length === 0, JSON.stringify(t.missing))
+      check('the old @sinclair name resolves to the real typebox', !!t.alias['@sinclair/typebox'], JSON.stringify(Object.keys(t.alias).slice(0, 5)))
+      const sameFile = (a, b) => String(a).split(/[\\/]/).slice(-3).join('/') === String(b).split(/[\\/]/).slice(-3).join('/')
+      check('legacy and current names reach the same module',
+        !!t.alias['@sinclair/typebox'] && !!t.alias.typebox && sameFile(t.alias['@sinclair/typebox'], t.alias.typebox),
+        JSON.stringify([t.alias['@sinclair/typebox'], t.alias.typebox]))
+      check('legacy subpath exports map too', !!t.alias['@sinclair/typebox/value'] && !!t.alias['@sinclair/typebox/compile'],
+        JSON.stringify(Object.keys(t.alias).filter((k) => k.startsWith('@sinclair'))))
+    }
+  }
+
+  console.log('a load error belongs to its own package')
+  {
+    // One shared error array made the first package's failure appear in every
+    // later report: '@sinclair/typebox' was blamed on three packages that had
+    // loaded fine, which would have sent me debugging the wrong one. The reply to
+    // a load must carry only what that load produced.
+    const src = await (await import('node:fs/promises')).readFile(path.join(ROOT, 'daemon', 'bootstrap.js'), 'utf8')
+    check('loadPackage takes a per-call error sink', /async function loadPackage \(root, pi, sink, noteSink\)/.test(src))
+    check('the /load reply uses its own array', /errors: pkgErrors/.test(src))
+    check('the /load reply no longer slices a global array', !/errors: loadErrors\.slice/.test(src))
+    check('notes are scoped the same way', /notes: pkgNotes\.slice/.test(src) && !/notes\.filter\(\(n\) => n\.includes\(owner\)\)/.test(src))
+    check('startup loads still record globally', /for \(const root of PACKAGES\) await loadPackage\(root, pi\)/.test(src))
+    // Health has to keep exposing loader failures, or scoping them would hide them
+    // entirely from bridge_status.
+    const health = src.slice(src.indexOf("if (url === '/health')"), src.indexOf("if (url === '/health')") + 400)
+    check('health still reports load errors', /loadErrors/.test(health), health.replace(/\s+/g, ' ').slice(0, 200))
+  }
+
+  console.log('an install failure names npm reason')
+  {
+    // pi-harness-runtime failed with 'npm exited 1' and nothing else, which sent
+    // me guessing at timeouts and registry problems for two rounds. npm's own
+    // output said 'Unsupported URL Type "workspace:"' - the published package
+    // ships six sub-packages whose manifests use the workspace protocol, which
+    // cannot resolve outside a workspace. The cause was in npm's terminal the
+    // whole time; stdio: 'ignore' threw it away.
+    const src = await (await import('node:fs/promises')).readFile(path.join(ROOT, 'src', 'resolve.js'), 'utf8')
+    const spawnLines = src.split('\n').filter((l) => /spawn\(/.test(l))
+    const discarding = spawnLines.filter((l) => l.includes("stdio: 'ignore'"))
+    check('no spawn discards output entirely', discarding.length === 0, discarding.join(' || ').slice(0, 200))
+    check('npm output is captured', /child\.stderr\.on\('data', keep\)/.test(src))
+    check('the failure reason appends what npm said', /npm said: /.test(src))
+    check('a killed install says so with its budget', /killed after /.test(src) && /INSTALL_BUDGET_MS/.test(src))
+    check('the budget is adjustable without a rebuild', /DSH_PI_BRIDGE_INSTALL_MS/.test(src))
+    check('no reason is built from the exit code alone',
+      !/reason: 'npm exited ' \+ code \}/.test(src) && !/reason: 'npm exited ' \+ code,$/.test(src))
+  }
+
+  console.log('a declared entry that is missing is reported')
+  {
+    // agent-comms declares pi.extensions './src/bridges/pi/extension.ts' and ships
+    // dist/bridges/pi/extension.js. The published tarball simply does not contain
+    // what its own manifest points at (pi's own loader fails on it too), and the
+    // bridge reported only 'nothing callable arrived' - which reads like a package
+    // without tools, so the user would never learn the pointer is broken.
+    const { piEntries, readJson } = await import('../src/manifest.js')
+    const root = path.join(HOME, 'fixtures', 'missing-entry')
+    await mkdir(path.join(root, 'dist'), { recursive: true })
+    await writeFile(path.join(root, 'package.json'), JSON.stringify({
+      name: 'missing-entry', version: '1.0.0', type: 'module',
+      pi: { extensions: ['./src/gone.ts'] },
+    }, null, 2), 'utf8')
+    await writeFile(path.join(root, 'dist', 'real.js'), 'export default function () {}\n', 'utf8')
+    const pkg = await readJson(path.join(root, 'package.json'))
+    const found = await piEntries(root, pkg)
+    // The silent drop is the root behaviour being worked around; assert it so the
+    // reporting code cannot be "fixed" by someone who assumes piEntries keeps it.
+    check('a missing declared entry resolves to nothing', (found.extensions || []).length === 0, JSON.stringify(found.extensions))
+    const boot = await (await import('node:fs/promises')).readFile(path.join(ROOT, 'daemon', 'bootstrap.js'), 'utf8')
+    check('the bridge names the missing declared entry', /declared entry not in package/.test(boot))
+    check('it reads the package own declaration, not the filtered list',
+      /declared = \(\(pkg\.pi && pkg\.pi\.extensions\) \|\| \[\]\)/.test(boot))
+  }
+
   console.log('caches stay outside the published tree')
   {
     // A 1.9 GB npm-install tree once landed under scripts/: files:["scripts"] would

@@ -197,6 +197,24 @@ export function buildAliasTable (piDir) {
       if (!alias[k]) alias[k] = v
     }
   }
+  // A renamed host module: pi publishes typebox, but packages still import the
+  // old @sinclair/typebox name, and pi's own alias table maps both. Resolving
+  // '@sinclair/typebox' by name finds nothing (there is no @sinclair directory),
+  // so the alias has to be built by pointing the legacy name at the real
+  // package's own resolved entry - the same subpath structure, different name.
+  // Without it, a published package (@ff-labs/pi-fff) failed to load with
+  // 'Cannot find module @sinclair/typebox' while typebox was sitting right there.
+  const legacy = [
+    ['@sinclair/typebox', 'typebox'],
+    ['@sinclair/typebox/compile', 'typebox/compile'],
+    ['@sinclair/typebox/value', 'typebox/value'],
+  ]
+  for (const [oldName, newName] of legacy) {
+    if (alias[oldName]) continue
+    const target = resolveSpecifier(req, piDir, newName)
+    if (target) alias[oldName] = target
+  }
+
   // '@mariozechner/*' is the legacy scope and '@sinclair/typebox' the old name:
   // absent in a modern install, which is not a failure - only a package that
   // actually imports them would need them, and pi lists both defensively.

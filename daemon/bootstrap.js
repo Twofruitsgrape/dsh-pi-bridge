@@ -150,22 +150,51 @@ function json (res, code, body) {
   res.end(JSON.stringify(body))
 }
 
-async function loadPackage (root, pi) {
+/**
+ * Load one package, collecting its own failures.
+ *
+ * @param {string} root package directory
+ * @param {any} pi the real extension API
+ * @param {string[]} [sink] where this package's load errors go; the caller's own
+ *        list, because a shared array made one package's failure appear in every
+ *        later report - observed as '@sinclair/typebox' being blamed on three
+ *        unrelated packages that had loaded fine.
+ */
+async function loadPackage (root, pi, sink, noteSink) {
+  const errors = sink || loadErrors
+  const noted = noteSink || notes
   let manifest = null
   try { manifest = await import(pathToFileURL(path.resolve(HERE, '..', 'src', 'manifest.js')).href) }
-  catch (e) { loadErrors.push('manifest.js: ' + String(e && e.message).slice(0, 140)) }
+  catch (e) { errors.push('manifest.js: ' + String(e && e.message).slice(0, 140)) }
   let files = []
+  let declared = []
   if (manifest && manifest.piEntries && manifest.readJson) {
     try {
       const pkg = await manifest.readJson(path.join(root, 'package.json'))
-      files = (await manifest.piEntries(root, pkg)).extensions
-    } catch (e) { loadErrors.push(root + ': manifest parse ' + String(e && e.message).slice(0, 140)) }
+      const found = await manifest.piEntries(root, pkg)
+      // piEntries drops a declared path that is not on disk - that removal is the
+      // finding, so keep the package's own declaration to name it.
+      declared = ((pkg.pi && pkg.pi.extensions) || []).map((s) => String(s))
+      files = found.extensions
+    } catch (e) { errors.push(root + ': manifest parse ' + String(e && e.message).slice(0, 140)) }
   }
   if (!files.length) {
     for (const cand of ['extensions/index.ts', 'extensions/index.js', 'index.ts', 'index.js']) {
       const p = path.join(root, cand)
       try { await (await import('node:fs/promises')).stat(p); files.push(p); break } catch { /* next */ }
     }
+  }
+  /**
+   * Name a declared entry that is not in the package.
+   *
+   * agent-comms declares pi.extensions './src/bridges/pi/extension.ts' but ships
+   * dist/bridges/pi/extension.js, so nothing was found and the only thing the
+   * user saw was 'nothing callable arrived' - which reads like a package that has
+   * no tools, when the truth is a broken manifest pointer (pi's own loader fails
+   * on this too). Saying which path was missing turns a mystery into a bug report.
+   */
+  if (!files.length && declared.length) {
+    for (const d of declared) errors.push('declared entry not in package: ' + d + ' (nothing else to load)')
   }
   const seen = new Set()
   for (const file of files) {
@@ -174,11 +203,11 @@ async function loadPackage (root, pi) {
     try {
       const mod = await resolveFile(file)
       const factory = mod && (mod.default || mod.activate || (typeof mod === 'function' ? mod : null))
-      if (typeof factory !== 'function') { loadErrors.push(path.basename(file) + ': no default extension factory'); continue }
+      if (typeof factory !== 'function') { errors.push(path.basename(file) + ': no default extension factory'); continue }
       await factory(apiFor(pi, path.basename(root)))
-      notes.push('loaded ' + path.basename(file))
+      noted.push('loaded ' + path.basename(file))
     } catch (e) {
-      loadErrors.push(file + ': ' + String(e && e.message).slice(0, 220))
+      errors.push(file + ': ' + String(e && e.message).slice(0, 220))
     }
   }
 }
@@ -244,19 +273,22 @@ function startServer (pi) {
           const { root } = JSON.parse(raw || '{}')
           if (!root) return json(res, 200, { ok: false, error: 'no package root given' })
           const owner = path.basename(String(root).replace(/[\\/]+$/, ''))
-          await loadPackage(root, pi)
+          await loadPackage(root, pi, pkgErrors, pkgNotes)
           // Report every tool this package owns, not just the ones that appeared:
           // the daemon outlives a single DSH call, so a package loaded by an
           // earlier preview or install contributes nothing new yet is still
           // perfectly callable. Reporting only the delta made an idempotent
           // reinstall look like a package with no capabilities.
+          const pkgErrors = []
+          const pkgNotes = []
           const owned = [...recorded.entries()].filter(([, e]) => e.origin === owner)
           return json(res, 200, {
             ok: true,
             added: owned.map(([n, e]) => describe(n, e)),
             commands: [...recordedCommands.entries()].filter(([, c]) => c.origin === owner).map(([n, c]) => ({ name: n, origin: c.origin, description: c.description })),
-            errors: loadErrors.slice(-4),
-            notes: notes.slice(-4),
+            // This load's own failures only, and only those attributable to it.
+            errors: pkgErrors,
+            notes: pkgNotes.slice(-4),
           })
         }
 
