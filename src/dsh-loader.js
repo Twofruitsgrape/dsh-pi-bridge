@@ -176,14 +176,21 @@ export async function loadDshBundle (dir, ctx, opts) {
       try {
         await ctx.inject(wants, (inner) => apply(observeScope(inner, tools, commands, skillCount, registered, alreadyPresent, conflicts), (mod.default && mod.default.config) || {}))
       } catch (e) {
-        // A service the bundle asks for that this profile never composed is a
-        // fact about the profile, not a package bug: an adapter bundle needs the
-        // llm service, a UI bundle the browser. Report the name so the user knows
-        // what to mount, instead of a stack trace.
         injected = false
+        // Two different causes read the same way if blamed on the profile, so
+        // tell them apart. A bundle whose apply() reads config.<field>.get() is
+        // asking for values the host binds from the plugin's Config schema and
+        // its patch row - the bridge cannot fabricate those, and calling that a
+        // missing service would send the user to mount something that already
+        // exists. dsh-plugin-model-proxy failed this way and my first report
+        // named the wrong cause.
+        const msg = String((e && e.message) || e)
+        const configBound = /Cannot read properties of undefined \(reading 'get'\)|is not a function|reading 'set'/.test(msg)
         return {
           name: info.name, tools: [], commands: [], skills: 0, mapped: [],
-          error: 'needs the "' + (wants.join('", "') || 'service') + '" service, which this profile does not compose: ' + String((e && e.message) || e).slice(0, 140),
+          error: configBound
+            ? 'needs configuration the host binds from its Config schema and patch row (apply() reads config.<field>.get()), which a runtime load cannot fabricate - mount it as a profile bundle instead (dsh plugin --profile <name> install <source>): ' + msg.slice(0, 120)
+            : 'needs the "' + (wants.join('", "') || 'service') + '" service, which this profile does not compose: ' + msg.slice(0, 140),
         }
       }
     } else {

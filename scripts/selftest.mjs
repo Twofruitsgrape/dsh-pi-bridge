@@ -11,8 +11,8 @@
  *
  * Run: node scripts/selftest.mjs   (SELFTEST_KEEP=1 keeps the temp cache)
  */
-import { mkdir, writeFile, rm } from 'node:fs/promises'
-import { fileURLToPath } from 'node:url'
+import { mkdir, writeFile, rm, readFile } from 'node:fs/promises'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
 import os from 'node:os'
 
@@ -573,6 +573,66 @@ async function main () {
       try { const x = await rf(path.join(ROOT, rel), 'utf8'); if (/fileURLToPath\(/.test(x) && !/import .*fileURLToPath/.test(x)) missingImport.push(rel) } catch { /* checked above */ }
     }
     check('fileURLToPath is imported where used', missingImport.length === 0, missingImport.join(', '))
+  }
+
+  console.log('a split bundle resolves its own name')
+  {
+    // dsh-mnemon's providers each \`import "dsh-mnemon"\`. Installed by the plugin
+    // manager they sit beside the parent so Node walks up and finds it; in the
+    // bridge cache they do not, and the load died on the first provider. The fix
+    // writes a forwarding package, and forwarding is easy to get wrong: './..'
+    // targets throw ERR_INVALID_PACKAGE_TARGET, a missing directory throws ENOENT,
+    // and an unimported helper throws ReferenceError at the caller - all three
+    // happened here and none of them were visible without resolving for real.
+    const root = path.join(HOME, 'fixtures', 'selfref')
+    await mkdir(path.join(root, 'node_modules', 'provider-a'), { recursive: true })
+    await writeFile(path.join(root, 'package.json'), JSON.stringify({
+      name: 'my-bundle', version: '2.0.0', type: 'module', main: './lib/index.js',
+      exports: { '.': { import: './lib/index.js' }, './core': { import: './lib/core.js' } },
+    }, null, 2))
+    await mkdir(path.join(root, 'lib'), { recursive: true })
+    await writeFile(path.join(root, 'lib', 'index.js'), 'export const marker = "PARENT"\n', 'utf8')
+    await writeFile(path.join(root, 'lib', 'core.js'), 'export const core = "CORE"\n', 'utf8')
+    await writeFile(path.join(root, 'node_modules', 'provider-a', 'package.json'), JSON.stringify({
+      name: 'provider-a', version: '1.0.0', type: 'module', main: './index.js', dependencies: { 'my-bundle': '^2.0.0' },
+    }, null, 2))
+    // 让 provider-a 视为"已安装"，走离线路径（不联网）
+    await mkdir(path.join(root, 'node_modules', 'my-bundle'), { recursive: true }).catch(() => {})
+    await writeFile(path.join(root, 'node_modules', 'provider-a', 'index.js'), 'import { marker } from "my-bundle"\nexport const seen = marker\n', 'utf8')
+
+    const { installDependencies } = await import('../src/resolve.js')
+    const notes = []
+    const deps = await installDependencies(root, (m) => notes.push(String(m)))
+    check('self-reference reported', notes.some((n) => /self-reference/.test(n)), notes.join(' | '))
+    const shimFile = path.join(root, 'node_modules', 'my-bundle', 'package.json')
+    let shim = null
+    try { shim = JSON.parse(await readFile(shimFile, 'utf8')) } catch (e) { check('forwarding package written', false, String(e.code)) }
+    if (shim) {
+      check('forwarding package keeps the name', shim.name === 'my-bundle', JSON.stringify(shim).slice(0, 120))
+      check('targets do not climb out with "./.."', !JSON.stringify(shim).includes('"./..'), JSON.stringify(shim.exports || shim.main))
+      const { createRequire } = await import('node:module')
+      const req = createRequire(path.join(root, 'node_modules', 'provider-a', 'index.js'))
+      let resolved = ''
+      try { resolved = req.resolve('my-bundle') } catch (e) { check('provider resolves the parent by name', false, e.code + ' ' + String(e.message).slice(0, 90)) }
+      if (resolved) {
+        // Landing on the forwarding file is the design, not a failure: it climbs
+        // to the parent with a relative import that "exports" would forbid. What
+        // matters is that importing through it yields the parent's own value - one
+        // module instance, not a copy.
+        check('resolution lands on the forwarding package', resolved.includes(path.join('node_modules', 'my-bundle')), resolved)
+        const mod = await import(pathToFileURL(resolved).href)
+        check('importing the parent name yields the parent value', mod.marker === 'PARENT', JSON.stringify(Object.keys(mod)))
+        let sub = ''
+        try { sub = req.resolve('my-bundle/core') } catch (e) { check('subpath export resolves', false, e.code) }
+        if (sub) {
+          const subMod = await import(pathToFileURL(sub).href)
+          check('subpath yields the parent core value', subMod.core === 'CORE', JSON.stringify(Object.keys(subMod)))
+        }
+        // The provider itself must import cleanly through the forwarder.
+        const viaProvider = await import(pathToFileURL(path.join(root, 'node_modules', 'provider-a', 'index.js')).href)
+        check('a dependent package imports the parent by name', viaProvider.seen === 'PARENT', JSON.stringify(viaProvider))
+    }
+  }
   }
 
   console.log('caches stay outside the published tree')

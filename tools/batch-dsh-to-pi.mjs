@@ -15,7 +15,7 @@
  * Run: node tools/batch-dsh-to-pi.mjs
  */
 import { dshHostStatus, dshHostLoad, dshHostCall, dshParamsToSchema } from '../src/dsh-host-client.js'
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import os from 'node:os'
@@ -50,12 +50,38 @@ if (!(health && health.ok && health.serve)) {
 }
 await log('live DSH session: pid=' + health.pid)
 
-const npmRoot = path.join(os.homedir(), '.dsh', 'profiles', 'desktop', 'node_modules')
-const resolved = []
-for (const name of BUNDLES) {
-  const dir = path.join(npmRoot, name)
-  if (!existsSync(path.join(dir, 'package.json'))) { await log('absent locally: ' + name); continue }
-  resolved.push({ name, dir })
+// Where to look: the user's own profile by default, or a directory given on the
+// command line, so third-party packages pulled from npm can be tested the same
+// way. A JSON file of explicit paths is also accepted.
+const arg = process.argv[2] || ''
+let resolved = []
+if (arg.endsWith('.json')) {
+  const { readFile } = await import('node:fs/promises')
+  const list = JSON.parse(await readFile(arg, 'utf8'))
+  const listed = []
+  for (const p of list) {
+    const dir = path.resolve(p)
+    let name = path.basename(dir)
+    try { const { readFileSync } = await import('node:fs'); name = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8')).name || name } catch { /* fall back */ }
+    if (existsSync(path.join(dir, 'package.json'))) listed.push({ name, dir })
+  }
+  resolved = listed
+} else {
+  const root = arg ? path.resolve(arg) : path.join(os.homedir(), '.dsh', 'profiles', 'desktop', 'node_modules')
+  for (const name of BUNDLES) {
+    const dir = path.join(root, name)
+    if (!existsSync(path.join(dir, 'package.json'))) { await log('absent locally: ' + name); continue }
+    resolved.push({ name, dir })
+  }
+  // An explicit directory listing beats the default names when the root is not the
+  // user profile: whatever bundles live there get tested.
+  if (!arg.endsWith('.json') && root !== path.join(os.homedir(), '.dsh', 'profiles', 'desktop', 'node_modules') && !resolved.length) {
+    for (const name of readdirSync(root)) {
+      const dir = path.join(root, name)
+      try { if (!statSync(dir).isDirectory()) continue } catch { continue }
+      if (existsSync(path.join(dir, 'package.json'))) resolved.push({ name, dir })
+    }
+  }
 }
 await log('bundles found: ' + resolved.map((r) => r.name).join(', '))
 
@@ -121,7 +147,10 @@ for (const row of rows) {
     const shapeOk = !!(schema && schema.type === 'object' && schema.properties)
     if (!shapeOk) { calls.push({ tool: name, verdict: 'BAD-SHAPE' }); continue }
     structural++
-    if (!required.length || !READ_ONLY.test(name)) { calls.push({ tool: name, verdict: 'checked-structurally' }); continue }
+    // Safety comes from the name being read-only, not from the call failing
+    // validation: a status/list/preview tool given nothing should read state and
+    // answer. Anything not naming a read operation stays structural-only.
+    if (!READ_ONLY.test(name)) { calls.push({ tool: name, verdict: 'checked-structurally' }); continue }
     let res
     try { res = await dshHostCall(name, {}, { ms: 45000 }) }
     catch (e) { calls.push({ tool: name, verdict: 'THREW ' + String(e.message).slice(0, 110) }); continue }
@@ -147,9 +176,14 @@ await log('arriving with tools: ' + withTools.length + ' (' + withTools.map((r) 
 await log('contributed no callable tool: ' + rows.filter((r) => r.ok && !r.tools.length).map((r) => r.name + (r.commands.length ? '[cmds]' : '') + (r.skills ? '[skills x' + r.skills + ']' : '')).join(', ') || 'none')
 await log('contributed something: ' + rows.filter((r) => r.ok && (r.tools.length || r.commands.length || r.skills)).length)
 await log('load refused:      ' + rows.filter((r) => !r.ok).map((r) => r.name + '=' + r.error.slice(0, 70)).join('; '))
-await log('forwarded calls: ' + calls.length
+// "forwarded calls" must mean calls that left this process. Counting the
+// structural-only entries in that total claimed traffic that never happened.
+const sent = calls.filter((c) => c.verdict !== 'checked-structurally')
+await log('tools seen: ' + calls.length + ' (structural only: ' + (calls.length - sent.length) + ')')
+await log('forwarded calls: ' + sent.length
   + ' | returned: ' + calls.filter((c) => c.verdict === 'returned').length
   + ' | tool-error: ' + calls.filter((c) => c.verdict === 'tool-error').length
   + ' | host-error: ' + calls.filter((c) => c.verdict === 'host-error').length
   + ' | threw: ' + calls.filter((c) => /THREW/.test(c.verdict)).length)
+for (const c of sent) if (c.body) await log('  >> ' + c.tool + ': ' + c.body)
 await log('journal: ' + JOURNAL)

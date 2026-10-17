@@ -17,6 +17,7 @@ import { spawn } from 'node:child_process'
 import path from 'node:path'
 import os from 'node:os'
 import { extractTgz } from './tar.js'
+import { ensureSelfReference } from './self-ref.js'
 
 export const CACHE_ROOT = process.env.DSH_PI_BRIDGE_HOME
   ? path.resolve(process.env.DSH_PI_BRIDGE_HOME)
@@ -227,12 +228,17 @@ export async function installDependencies (dir, log) {
   let pkg = null
   try { pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) } catch { return { status: 'none' } }
   const deps = Object.keys((pkg && pkg.dependencies) || {})
-  if (!deps.length) return { status: 'none' }
+  if (!deps.length) { await ensureSelfReference(dir, note); return { status: 'none' } }
 
   const nm = path.join(dir, 'node_modules')
   await purgePlaceholders(nm, deps)
   const present = await readdir(nm).then((e) => e.filter((n) => !n.startsWith('.') && !n.startsWith('_')).length).catch(() => 0)
-  if (present >= deps.length) return { status: 'installed', count: deps.length, reason: 'already present' }
+  if (present >= deps.length) {
+    // The warm-cache path has to write the forwarding package too: skipping it
+    // made a bundle that imports itself load once and fail on every reload.
+    await ensureSelfReference(dir, note)
+    return { status: 'installed', count: deps.length, reason: 'already present' }
+  }
 
   const args = ['install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps']
   note('npm install (' + deps.length + ' dependencies) in ' + path.basename(dir))
@@ -246,6 +252,7 @@ export async function installDependencies (dir, log) {
   })
 
   const after = await readdir(nm).then((e) => e.filter((n) => !n.startsWith('.') && !n.startsWith('_')).length).catch(() => 0)
+  await ensureSelfReference(dir, note)
   if (code === 0) return { status: 'installed', count: deps.length, reason: after + ' dirs' }
   if (after > 0) return { status: 'partial', count: deps.length, reason: 'npm exited ' + code + ', ' + after + ' dirs present' }
   return { status: 'failed', count: deps.length, reason: 'npm exited ' + code }

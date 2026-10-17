@@ -55,9 +55,16 @@ export function dshHostTools (options) {
   return request('GET', '/tools', null, 15000, options && options.endpoint)
 }
 
-/** Ask the live DSH to load a bundle; returns the tools it registered. */
+/**
+ * Ask the live DSH to load a bundle; returns the tools it registered.
+ *
+ * A load can install the bundle's own dependencies, and the install budget on the
+ * far side is five minutes; a client timeout shorter than that would report a
+ * failure for work still in progress. dsh-mnemon, for one, declares nineteen
+ * dependencies.
+ */
 export function dshHostLoad (source, options) {
-  return request('POST', '/load', { source }, 120000, options && options.endpoint)
+  return request('POST', '/load', { source }, (options && options.ms) || 420000, options && options.endpoint)
 }
 
 /** Invoke a tool that the DSH session holds, and take back its native result. */
