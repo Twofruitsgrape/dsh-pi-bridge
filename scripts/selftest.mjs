@@ -618,6 +618,11 @@ async function main () {
       JSON.stringify(registered.filter((n) => !reported.includes(n))))
     const deferred = r.callable && r.callable.get('hl_deferred')
     check('the deferred tool is callable', !!deferred && typeof deferred.execute === 'function')
+    // Commands registered from the deferred callback must appear too: two paths
+    // disagreed on a live host run, and an empty list is not evidence of absence
+    // when the registration was never looked for.
+    const cmds = (r.commands || []).map((c) => c.name)
+    check('the deferred command is reported', cmds.includes('hl-cmd-deferred'), JSON.stringify(cmds))
     if (deferred) {
       const out = await deferred.execute({ text: 'x' }, {})
       check('calling it runs the bundle code', out && out.result === 'DEFERRED-RAN:x', JSON.stringify(out))

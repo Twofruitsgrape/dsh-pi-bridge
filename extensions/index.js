@@ -76,6 +76,10 @@ function formatReport(spec, captured, report, mode) {
     lines.push("        DSH_PI_BRIDGE_DSH_ENDPOINT=<host>:<port> here for real forwarding.");
   } else {
     lines.push("  bridged tools are callable in this session immediately.");
+  if (!report.tools.length && mode === "dsh-host") {
+    lines.push("  (nothing callable arrived; the bundle may register only after services it")
+    lines.push("   injects are composed in that profile, or it may be UI/configuration only)")
+  }
   }
   return lines.join("\n");
 }

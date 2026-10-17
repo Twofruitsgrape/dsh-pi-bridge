@@ -338,7 +338,16 @@ export async function apply (ctx, config) {
       if (loaded.mapped && loaded.mapped.length) lines.push('  host modules rewired: ' + loaded.mapped.join(', '))
       if (loaded.reused && loaded.reused.length) lines.push('  already registered in this session: ' + loaded.reused.join(', '))
       for (const c of loaded.conflicts || []) lines.push('  refused by the host: ' + c.name + ' (' + c.reason + ')')
-      if (!report.tools.length && !report.commands.length) lines.push('  (the bundle registered nothing: it may be UI-only, or need a service this profile does not compose)')
+      if (!report.tools.length && !report.commands.length) {
+        // Two very different situations both end with nothing registered, and the
+        // user cannot tell them apart from a count. A bundle that called
+        // ctx.inject asked for services this profile may not compose: its tools
+        // appear only when those services exist, so the fix is to mount what
+        // provides them (or use the profile that already does), not to reinstall.
+        lines.push(loaded.deferred
+          ? '  (registered nothing yet: it asks for services through ctx.inject, and its tools appear only once those services are composed in this profile - try the profile that ships them, or mount their provider)'
+          : '  (the bundle registered nothing at all: it is likely UI-only, configuration, or a host bridge)')
+      }
       return lines.join('\n')
     }),
   }))

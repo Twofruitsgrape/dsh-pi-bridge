@@ -155,6 +155,8 @@ export async function loadDshBundle (dir, ctx, opts) {
   const tools = []
   const commands = []
   /** Skill providers the bundle registers: real capability, just not callable. */
+  /** Whether the bundle used ctx.inject at all: registrations may be pending. */
+  const flags = { deferred: false }
   const skillCount = { count: 0 }
   /** Names the host refused because they already exist; reported, not fatal. */
   const alreadyPresent = []
@@ -165,7 +167,7 @@ export async function loadDshBundle (dir, ctx, opts) {
   const registered = (opts && opts.registered) || new Set()
   // Recording wrappers so the caller learns what the bundle registered, while
   // the registrations themselves go to the real host.
-  const scope = observeScope(ctx, tools, commands, skillCount, registered, alreadyPresent, conflicts)
+  const scope = observeScope(ctx, tools, commands, skillCount, registered, alreadyPresent, conflicts, flags)
   try {
     const tree = rewriteBundleTree(dir, opts.resolveSpec || hostEntry, { log })
     if (tree.mapped.length) log('rewrote ' + tree.files + ' file(s), host specifiers: ' + tree.mapped.join(', '))
@@ -190,7 +192,7 @@ export async function loadDshBundle (dir, ctx, opts) {
     let injected = true
     if (typeof ctx.inject === 'function') {
       try {
-        await ctx.inject(wants, (inner) => apply(observeScope(inner, tools, commands, skillCount, registered, alreadyPresent, conflicts), (mod.default && mod.default.config) || {}))
+        await ctx.inject(wants, (inner) => apply(observeScope(inner, tools, commands, skillCount, registered, alreadyPresent, conflicts, flags), (mod.default && mod.default.config) || {}))
       } catch (e) {
         injected = false
         // Two different causes read the same way if blamed on the profile, so
@@ -203,7 +205,7 @@ export async function loadDshBundle (dir, ctx, opts) {
         const msg = String((e && e.message) || e)
         const configBound = /Cannot read properties of undefined \(reading 'get'\)|is not a function|reading 'set'/.test(msg)
         return {
-          name: info.name, tools: [], commands: [], skills: 0, mapped: [],
+          name: info.name, tools: [], commands: [], skills: 0, mapped: [], deferred: flags.deferred,
           error: configBound
             ? 'needs configuration the host binds from its Config schema and patch row (apply() reads config.<field>.get()), which a runtime load cannot fabricate - mount it as a profile bundle instead (dsh plugin --profile <name> install <source>): ' + msg.slice(0, 120)
             : 'needs the "' + (wants.join('", "') || 'service') + '" service, which this profile does not compose: ' + msg.slice(0, 140),
@@ -224,6 +226,7 @@ export async function loadDshBundle (dir, ctx, opts) {
         .filter((t) => !alreadyPresent.includes(t.name))
         .map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })),
       reused: [...alreadyPresent],
+      deferred: flags.deferred,
       conflicts,
       commands,
       mapped: tree.mapped,
@@ -244,7 +247,7 @@ export async function loadDshBundle (dir, ctx, opts) {
  * bundle registers for real and the host accepts it exactly as it accepts a
  * boot-time plugin.
  */
-function observeScope (ctx, tools, commands, skillCounter, registered, alreadyPresent, conflicts) {
+function observeScope (ctx, tools, commands, skillCounter, registered, alreadyPresent, conflicts, flags) {
   const recording = (kind, sink) => {
     const real = ctx[kind]
     return new Proxy(real, {
@@ -285,7 +288,10 @@ function observeScope (ctx, tools, commands, skillCounter, registered, alreadyPr
       if (prop === 'inject') {
         const inject = target.inject
         if (typeof inject !== 'function') return inject
-        return (names, fn) => inject.call(target, names, (inner) => fn(observeScope(inner, tools, commands, skillCounter, registered, alreadyPresent, conflicts)))
+        return (names, fn) => {
+          flags.deferred = true
+          return inject.call(target, names, (inner) => fn(observeScope(inner, tools, commands, skillCounter, registered, alreadyPresent, conflicts, flags)))
+        }
       }
       if (prop === 'tools' && target.tools) return recording('tools', tools)
       if (prop === 'commands' && target.commands) return recording('commands', commands)

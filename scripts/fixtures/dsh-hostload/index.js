@@ -38,6 +38,13 @@ export function apply (ctx) {
   // these entirely - the tool exists in the host yet nothing can reach it.
   if (typeof ctx.inject === 'function') {
     ctx.inject(['commands'], (inner) => {
+      // A slash command registered from the same deferred callback: whether the
+      // report sees these is a separate question from tools, and the two paths
+      // disagreed on a live run (dsh_install listed /agent-teams, /load listed
+      // nothing for the same bundle).
+      if (inner.commands && typeof inner.commands.register === 'function') {
+        inner.commands.register({ name: 'hl-cmd-deferred', description: 'Deferred command.', handler: async () => {} })
+      }
       inner.tools.register(defineTool({
         name: 'hl_deferred',
         description: 'Registered from inside a deferred ctx.inject callback.',
