@@ -32,6 +32,24 @@ export function apply (ctx) {
       return { ok: true, result: 'HELD-' + ms }
     },
   }))
+  // Deferred registration through the host's own injection hook: real bundles
+  // (dsh-gitbash-shell, dsh-thinking-levels) register this way, waiting for a
+  // service to appear. A loader that only observes the scope it hands out misses
+  // these entirely - the tool exists in the host yet nothing can reach it.
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['commands'], (inner) => {
+      inner.tools.register(defineTool({
+        name: 'hl_deferred',
+        description: 'Registered from inside a deferred ctx.inject callback.',
+        parameters: { text: { type: 'string', required: true, description: 'text' } },
+        output: {
+          schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' }, result: { type: 'string' } } },
+          render: (_a, v) => [{ type: 'text', text: v.result }],
+        },
+        execute: async (a) => ({ ok: true, result: 'DEFERRED-RAN:' + a.text }),
+      }))
+    })
+  }
   ctx.tools.register(defineTool({
     name: 'hl_echo',
     description: 'Echo back, registered by a bundle that was loaded at runtime.',

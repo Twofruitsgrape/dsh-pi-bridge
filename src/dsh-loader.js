@@ -17,6 +17,7 @@ import { readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
+import os from 'node:os'
 
 /** Specifier families the running build supplies. */
 const HOST_PREFIXES = ['@deepseek-ai/', '@deepseek-harness/', 'cordis', 'schemastery', '@cordiverse/']
@@ -84,12 +85,27 @@ export function rewriteHostSpecifiers (source, resolveSpec = hostEntry) {
  *
  * @param {string} dir bundle root inside the cache
  * @param {(spec:string)=>string|null} resolveSpec
- * @param {{log?:(m:string)=>void, limit?:number}} [opts]
- * @returns {{files:number, mapped:string[]}}
+ * @param {{log?:(m:string)=>void, limit?:number, cacheRoot?:string}} [opts]
+ * @returns {{files:number, mapped:string[], refused?:boolean}}
  */
 export function rewriteBundleTree (dir, resolveSpec = hostEntry, opts) {
   const log = (opts && opts.log) || (() => {})
   const limit = (opts && opts.limit) || 4000
+  // Refuse to touch anything outside the bridge's own cache. Rewriting in place is
+  // what keeps a bundle's relative imports working, so the directory handed here
+  // must be the copy the bridge made, never a directory someone owns: a plugin
+  // author pointing dsh_install at their own working tree would otherwise have
+  // their source files replaced with host-module URLs. Measured the hard way - an
+  // offline test that passed a repository path rewrote the committed fixture.
+  // The cache root is recomputed here rather than imported from resolve.js: that
+  // module reaches this one through the entry points, and a cycle would make both
+  // unreadable. The same expression, and callers may pass their own.
+  const cacheRoot = (opts && opts.cacheRoot) || process.env.DSH_PI_BRIDGE_HOME || path.join(os.homedir(), ".dsh-pi-bridge")
+  const inside = cacheRoot && path.resolve(dir).startsWith(path.resolve(cacheRoot) + path.sep)
+  if (!inside) {
+    log('refusing to rewrite outside the bridge cache: ' + dir)
+    return { files: 0, mapped: [], refused: true }
+  }
   const mapped = new Set()
   let files = 0
   const walk = (current, depth) => {
@@ -260,6 +276,17 @@ function observeScope (ctx, tools, commands, skillCounter, registered, alreadyPr
   }
   return new Proxy(ctx, {
     get (target, prop) {
+      // A bundle registers from inside its own ctx.inject callback all the
+      // time - dsh-super-code and dsh-thinking-levels both do - and the host hands
+      // that callback a scope of its own, not the one this loader handed to apply().
+      // Wrapping only the apply() scope therefore misses every deferred tool: the
+      // host has it, the bridge reports none, and the other host is told the bundle
+      // contributed nothing. So the callback's argument gets wrapped too.
+      if (prop === 'inject') {
+        const inject = target.inject
+        if (typeof inject !== 'function') return inject
+        return (names, fn) => inject.call(target, names, (inner) => fn(observeScope(inner, tools, commands, skillCounter, registered, alreadyPresent, conflicts)))
+      }
       if (prop === 'tools' && target.tools) return recording('tools', tools)
       if (prop === 'commands' && target.commands) return recording('commands', commands)
       if (prop === 'skills' && target.skills) {

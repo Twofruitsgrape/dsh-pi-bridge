@@ -575,6 +575,67 @@ async function main () {
     check('fileURLToPath is imported where used', missingImport.length === 0, missingImport.join(', '))
   }
 
+  console.log('deferred registrations reach the report')
+  {
+    // A bundle registers from inside its own ctx.inject callback - the user's own
+    // dsh-super-code and dsh-thinking-levels do - and the host hands that callback
+    // a scope of its own, not the one this loader passed to apply(). Wrapping only
+    // the apply() scope therefore missed every deferred tool: the host had it, the
+    // bridge reported none, and the other side was told the bundle contributed
+    // nothing. Both facts are asserted here: nothing is missed, and an unwrapped
+    // callback would show up as a mismatch rather than a silent pass.
+    const { loadDshBundle, rewriteBundleTree } = await import('../src/dsh-loader.js')
+    const { cp } = await import('node:fs/promises')
+    const cache = path.join(HOME, 'defer-cache')
+    const bundle = path.join(cache, 'dsh-hostload')
+    await mkdir(cache, { recursive: true })
+    await cp(path.join(ROOT, 'scripts', 'fixtures', 'dsh-hostload'), bundle, { recursive: true })
+    const hostFile = path.join(cache, 'defer-host.mjs')
+    await writeFile(hostFile, 'export function defineTool(o) { return o }\n', 'utf8')
+
+    const registered = []
+    const ctx = {
+      tools: { register: (t) => registered.push(t.name) },
+      commands: { register: () => {} },
+      skills: { registerProvider: () => {} },
+      inject (names, fn) {
+        // The host gives the callback a different scope object than apply() saw,
+        // and that object is still a full scope - it carries inject itself, so a
+        // bundle can nest. A mock missing it silently skips the deferred path.
+        return fn({ tools: ctx.tools, commands: ctx.commands, skills: ctx.skills, llm: {}, inject: ctx.inject })
+      },
+    }
+    const spec = (sp) => (sp === '@deepseek-ai/dsh-tools' ? hostFile.replace(/\\/g, '/') : null)
+    const r = await loadDshBundle(bundle, ctx, { log: () => {}, resolveSpec: spec, cacheRoot: cache })
+    check('the cache copy loads without a host', !r.error, r.error || '')
+    // Compare sets, not a count: the number of tools in a fixture is not what this
+    // rule is about, and hardcoding it broke the moment the fixture gained one.
+    check('host registered the fixture tools', ['hl_hold', 'hl_echo', 'hl_deferred'].every((n) => registered.includes(n)), JSON.stringify(registered))
+    const reported = (r.tools || []).map((t) => t.name)
+    check('the report lists the deferred tool too', reported.includes('hl_deferred'), JSON.stringify(reported))
+    check('nothing the host has is missing from the report',
+      registered.filter((n) => !reported.includes(n)).length === 0,
+      JSON.stringify(registered.filter((n) => !reported.includes(n))))
+    const deferred = r.callable && r.callable.get('hl_deferred')
+    check('the deferred tool is callable', !!deferred && typeof deferred.execute === 'function')
+    if (deferred) {
+      const out = await deferred.execute({ text: 'x' }, {})
+      check('calling it runs the bundle code', out && out.result === 'DEFERRED-RAN:x', JSON.stringify(out))
+    }
+
+    // The in-place rewrite is confined to the bridge cache. A user pointing
+    // dsh_install at their own source tree must not have that tree rewritten with
+    // host-module URLs - that happened to a fixture here during development.
+    const repoFile = path.join(ROOT, 'scripts', 'fixtures', 'dsh-hostload', 'index.js')
+    const before = await readFile(repoFile, 'utf8')
+    const refused = rewriteBundleTree(path.dirname(repoFile), spec, { cacheRoot: cache })
+    check('a path outside the cache is refused', refused.refused === true && refused.files === 0, JSON.stringify(refused))
+    const after = await readFile(repoFile, 'utf8')
+    check('the refused source file is unchanged', before === after)
+    check('rewriting inside the cache still works',
+      rewriteBundleTree(bundle, spec, { cacheRoot: cache }).files > 0)
+  }
+
   console.log('scoped dependencies are checked by name')
   {
     // 'How many top-level entries does node_modules have' is not evidence that the

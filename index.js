@@ -312,7 +312,7 @@ export async function apply (ctx, config) {
     output: OUT(),
     execute: guarded(async (args) => {
       const m = await materialize(args.source, { log, refresh: !!args.refresh })
-      const loaded = await loadDshBundle(m.root, ctx, { log, registered: new Set(hostCallable.keys()) })
+      const loaded = await loadDshBundle(m.root, ctx, { cacheRoot: CACHE_ROOT, log, registered: new Set(hostCallable.keys()) })
       if (loaded.error) throw new Error(loaded.error)
       for (const t of loaded.tools || []) {
         const def = loaded.callable && loaded.callable.get(t.name)
@@ -462,7 +462,7 @@ export async function apply (ctx, config) {
       load: async (source) => {
         if (!source) throw new Error('no source given')
         const m = await materialize(source, { log })
-        const r = await loadDshBundle(m.root, serveScope, { log, registered: new Set(hostCallable.keys()) })
+        const r = await loadDshBundle(m.root, serveScope, { cacheRoot: CACHE_ROOT, log, registered: new Set(hostCallable.keys()) })
         if (r.error) return { error: r.error, tools: [], commands: [] }
         // Tools the session already had are still exposed: they were registered by
         // the user's own dsh_install, and their definitions are in hostCallable.
