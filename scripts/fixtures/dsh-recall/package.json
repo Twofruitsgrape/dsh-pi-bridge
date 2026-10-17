@@ -1,0 +1,11 @@
+{
+  "name": "dsh-recall-fixture",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./index.js",
+  "keywords": [
+    "dsh",
+    "dsh-plugin"
+  ],
+  "description": "Fixture: registers plainly, with no host imports, so reload behaviour can be tested offline."
+}

@@ -199,6 +199,60 @@ export async function apply (ctx, config) {
    * made through the tool (observed on a live boot: /tools answered []).
    */
   const hostCallable = new Map()
+  /** bundle identity -> what the first load registered, so a second is a no-op. */
+  const loadedBundles = new Map()
+  const bundleKey = (spec) => String(spec || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+
+  /**
+   * Re-announce what a bundle already contributed instead of applying it twice.
+   *
+   * Reusing the cached module does not make a reload harmless: loadDshBundle
+   * still calls apply(), and a second registration of the same service, prompt
+   * section or tool name is what cordis rejects. On a live run this turned an
+   * idempotent reinstall into "cannot load", and - worse - into an empty tool
+   * list for a package whose tools were present in the session the whole time.
+   *
+   * @param {string} key
+   * @returns {any|null}
+   */
+  /**
+   * The lines every load report shares: what arrived, and why nothing did.
+   *
+   * Both branches - a fresh load and a recalled one - have to answer the same
+   * question, and two copies of this text drift: the recalled branch was added
+   * without the explanation of an empty result, so reinstalling a package that
+   * contributes nothing said nothing about why.
+   *
+   * @param {any} summary { tools, commands, skills, mapped, reused, conflicts, deferred }
+   */
+  function formatLoaded (summary) {
+    const tools = (summary.tools || []).map((t) => (t && t.name) || t)
+    const cmds = (summary.commands || []).map((c) => (typeof c === 'string' ? c : '/' + (c && c.name)))
+    const lines = []
+    lines.push('  tools: ' + (tools.length ? tools.join(', ') : 'none'))
+    lines.push('  commands: ' + (cmds.length ? cmds.join(', ') : 'none'))
+    if (summary.skills) lines.push('  skill providers registered: ' + summary.skills)
+    if (summary.mapped && summary.mapped.length) lines.push('  host modules rewired: ' + summary.mapped.join(', '))
+    if (summary.reused && summary.reused.length) lines.push('  already registered in this session: ' + summary.reused.join(', '))
+    for (const c of summary.conflicts || []) lines.push('  refused by the host: ' + c.name + ' (' + c.reason + ')')
+    if (!tools.length && !cmds.length && !summary.skills) {
+      // Two different situations both end with nothing registered. A bundle that
+      // called ctx.inject is waiting for services this profile may not compose, so
+      // its tools appear only once those exist - the fix is to mount the provider or
+      // use the profile that ships them, not to reinstall.
+      lines.push(summary.deferred
+        ? '  (registered nothing yet: it asks for services through ctx.inject, and its tools appear once those services are composed - try the profile that ships them)'
+        : '  (the bundle registered nothing at all: it is likely UI-only, configuration, or a host bridge)')
+    }
+    return lines
+  }
+
+  function recallBundle (key) {
+    const prior = loadedBundles.get(key)
+    if (!prior) return null
+    const tools = prior.tools.filter((t) => hostCallable.has(t.name))
+    return { ...prior, tools, reused: tools.map((t) => t.name), alreadyLoaded: true }
+  }
 
   /** Names this process registered, so a reinstall is a no-op rather than a clash. */
   const shellNames = new Set()
@@ -311,13 +365,24 @@ export async function apply (ctx, config) {
     parameters: { source: SOURCE, refresh: { type: 'boolean', description: 'Re-download the source even when cached.' } },
     output: OUT(),
     execute: guarded(async (args) => {
+      const key = bundleKey(args.source)
       const m = await materialize(args.source, { log, refresh: !!args.refresh })
+      if (!args.refresh) {
+        const recalled = recallBundle(key)
+        if (recalled) {
+          state.bridges[args.source] = { ...(state.bridges[args.source] || {}), name: recalled.name, mode: 'host-load', root: m.root, at: new Date().toISOString() }
+          await writeRegistry(state)
+          return ['loaded ' + recalled.name + '@' + (recalled.version || m.info.version) + ' (already loaded in this session)']
+            .concat(['  dependencies: ' + ((m.dependencies && m.dependencies.status) || 'n/a')], formatLoaded(recalled)).join('\n')
+        }
+      }
       const loaded = await loadDshBundle(m.root, ctx, { cacheRoot: CACHE_ROOT, log, registered: new Set(hostCallable.keys()) })
       if (loaded.error) throw new Error(loaded.error)
       for (const t of loaded.tools || []) {
         const def = loaded.callable && loaded.callable.get(t.name)
         if (def) hostCallable.set(t.name, { def, source: args.source })
       }
+      loadedBundles.set(key, { name: loaded.name, version: m.info.version, tools: loaded.tools, commands: loaded.commands, skills: loaded.skills })
       const report = {
         tools: loaded.tools.map((t) => t.name),
         commands: loaded.commands.map((c) => c.name),
@@ -330,24 +395,9 @@ export async function apply (ctx, config) {
         root: m.root, report, at: new Date().toISOString(),
       }
       await writeRegistry(state)
-      const lines = ['loaded ' + loaded.name + '@' + m.info.version + ' into this DSH session']
-      lines.push('  dependencies: ' + ((m.dependencies && m.dependencies.status) || 'n/a'))
-      lines.push('  tools: ' + (report.tools.length ? report.tools.join(', ') : 'none'))
-      lines.push('  commands: ' + (report.commands.length ? report.commands.map((c) => '/' + c).join(', ') : 'none'))
-      if (loaded.skills) lines.push('  skill providers registered: ' + loaded.skills)
-      if (loaded.mapped && loaded.mapped.length) lines.push('  host modules rewired: ' + loaded.mapped.join(', '))
-      if (loaded.reused && loaded.reused.length) lines.push('  already registered in this session: ' + loaded.reused.join(', '))
-      for (const c of loaded.conflicts || []) lines.push('  refused by the host: ' + c.name + ' (' + c.reason + ')')
-      if (!report.tools.length && !report.commands.length) {
-        // Two very different situations both end with nothing registered, and the
-        // user cannot tell them apart from a count. A bundle that called
-        // ctx.inject asked for services this profile may not compose: its tools
-        // appear only when those services exist, so the fix is to mount what
-        // provides them (or use the profile that already does), not to reinstall.
-        lines.push(loaded.deferred
-          ? '  (registered nothing yet: it asks for services through ctx.inject, and its tools appear only once those services are composed in this profile - try the profile that ships them, or mount their provider)'
-          : '  (the bundle registered nothing at all: it is likely UI-only, configuration, or a host bridge)')
-      }
+      const lines = ['loaded ' + loaded.name + '@' + m.info.version + ' into this DSH session',
+        '  dependencies: ' + ((m.dependencies && m.dependencies.status) || 'n/a')]
+        .concat(formatLoaded(loaded))
       return lines.join('\n')
     }),
   }))
@@ -470,7 +520,10 @@ export async function apply (ctx, config) {
       list: () => [...hostCallable.keys()],
       load: async (source) => {
         if (!source) throw new Error('no source given')
+        const key = bundleKey(source)
         const m = await materialize(source, { log })
+        const recalled = recallBundle(key)
+        if (recalled) return { ok: true, ...recalled, error: undefined }
         const r = await loadDshBundle(m.root, serveScope, { cacheRoot: CACHE_ROOT, log, registered: new Set(hostCallable.keys()) })
         if (r.error) return { error: r.error, tools: [], commands: [] }
         // Tools the session already had are still exposed: they were registered by
@@ -483,6 +536,7 @@ export async function apply (ctx, config) {
           const def = r.callable && r.callable.get(t.name)
           if (def) hostCallable.set(t.name, { def, source })
         }
+        loadedBundles.set(key, { name: r.name, version: m.info.version, tools: r.tools, commands: r.commands, skills: r.skills })
         return { tools: r.tools, commands: r.commands, skills: r.skills, reused: r.reused, name: r.name, version: m.info.version }
       },
       call: async (name, args) => {

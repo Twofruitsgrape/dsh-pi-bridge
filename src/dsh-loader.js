@@ -187,34 +187,84 @@ export async function loadDshBundle (dir, ctx, opts) {
      * names; the bundle's declared inject list is what it needs, plus the ones it
      * registers into. This is also how the bridge mounts skills for itself.
      */
-    const wants = Array.isArray(mod.inject) ? mod.inject.slice() : []
-    for (const need of ['tools', 'commands']) if (!wants.includes(need)) wants.push(need)
-    let injected = true
+    /**
+     * Ask for the services the bundle declares, then for the two this bridge
+     * observes, then fall back - and never pretend a refusal was a success.
+     *
+     * Cordis resolves a service out of the fiber that declared it, so reading
+     * ctx.llm from a fiber that only injected 'tools' throws 'cannot get property
+     * "llm" without inject' - measured on a live session against four real
+     * bundles. The host's mechanism for reaching services on demand is
+     * ctx.inject(names, fn), which opens a child scope carrying exactly those
+     * names.
+     *
+     * Adding tools and commands to every request looked harmless and was not: a
+     * profile that does not compose 'commands' makes ctx.inject return undefined
+     * for the whole request, so a bundle needing only tools never ran apply() and
+     * the report came back 'tools: none'. Caught offline by the reload test, which
+     * is why the wider request is only the first attempt, not the only one.
+     */
+    const declared = Array.isArray(mod.inject) ? mod.inject.slice() : []
+    if (!declared.length && mod.default && Array.isArray(mod.default.inject)) declared.push(...mod.default.inject)
+    const wider = declared.slice()
+    for (const need of ['tools', 'commands']) if (!wider.includes(need)) wider.push(need)
+    const bundleConfig = (mod.default && mod.default.config) || {}
+    const attempts = wider.length === declared.length ? [wider] : [wider, declared]
     if (typeof ctx.inject === 'function') {
-      try {
-        await ctx.inject(wants, (inner) => apply(observeScope(inner, tools, commands, skillCount, registered, alreadyPresent, conflicts, flags), (mod.default && mod.default.config) || {}))
-      } catch (e) {
-        injected = false
-        // Two different causes read the same way if blamed on the profile, so
-        // tell them apart. A bundle whose apply() reads config.<field>.get() is
-        // asking for values the host binds from the plugin's Config schema and
-        // its patch row - the bridge cannot fabricate those, and calling that a
-        // missing service would send the user to mount something that already
-        // exists. dsh-plugin-model-proxy failed this way and my first report
-        // named the wrong cause.
-        const msg = String((e && e.message) || e)
-        const configBound = /Cannot read properties of undefined \(reading 'get'\)|is not a function|reading 'set'/.test(msg)
+      let composed = false
+      let lastError = null
+      for (const names of attempts) {
+        // Whether the callback ran is the evidence, not the return value: the host
+        // hands back a dispose object, a stand-in scope hands back whatever apply()
+        // returned (usually undefined), and reading that as failure would reject a
+        // load that had in fact registered everything.
+        let ran = false
+        try {
+          await ctx.inject(names, (inner) => {
+            ran = true
+            return apply(observeScope(inner, tools, commands, skillCount, registered, alreadyPresent, conflicts, flags), bundleConfig)
+          })
+        } catch (e) {
+          lastError = e
+          continue
+        }
+        composed = ran
+        if (ran) break
+      }
+      if (!composed) {
+        const msg = String((lastError && (lastError.message || lastError)) || '')
+        if (lastError) {
+          // Three causes read alike unless the message is inspected, and guessing
+          // wrong sends the user off to fix something that is not broken:
+          // - config.<field>.get(): values the host binds from the bundle's Config
+          //   schema and patch row, which a runtime load cannot fabricate
+          //   (dsh-plugin-model-proxy);
+          // - 'has been registered': the session already holds those names, so this
+          //   bundle is already loaded and callable (three published packages on a
+          //   real pi run were reported as needing a service that was in fact
+          //   present the whole time);
+          // - otherwise the named services are genuinely not composed here.
+          const configBound = /Cannot read properties of undefined \(reading 'get'\)|is not a function|reading 'set'/.test(msg)
+          const alreadyRegistered = /has been registered|already registered|is already registered|duplicate/i.test(msg)
+          return {
+            name: info.name, tools: [], commands: [], skills: 0, mapped: [], deferred: flags.deferred,
+            alreadyLoaded: alreadyRegistered,
+            error: configBound
+              ? 'needs configuration the host binds from its Config schema and patch row (apply() reads config.<field>.get()), which a runtime load cannot fabricate - mount it as a profile bundle instead: ' + msg.slice(0, 120)
+              : alreadyRegistered
+                ? 'already loaded in this session (' + msg.slice(0, 110) + ')'
+                : 'needs services this profile does not compose (' + declared.join(', ') + '): ' + msg.slice(0, 140),
+          }
+        }
         return {
           name: info.name, tools: [], commands: [], skills: 0, mapped: [], deferred: flags.deferred,
-          error: configBound
-            ? 'needs configuration the host binds from its Config schema and patch row (apply() reads config.<field>.get()), which a runtime load cannot fabricate - mount it as a profile bundle instead (dsh plugin --profile <name> install <source>): ' + msg.slice(0, 120)
-            : 'needs the "' + (wants.join('", "') || 'service') + '" service, which this profile does not compose: ' + msg.slice(0, 140),
+          error: 'this profile does not compose the services the bundle asks for (' + declared.join(', ') + '), so its registrations would go nowhere',
         }
       }
     } else {
-      await apply(scope, (mod.default && mod.default.config) || {})
+      await apply(scope, bundleConfig)
     }
-    void injected
+
     for (const t of tools) callable.set(t.name, t.def)
     // A reused tool is still callable: its definition came from the first load,
     // which is why the caller keeps one shared registry rather than this map.

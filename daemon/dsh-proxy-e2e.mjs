@@ -134,6 +134,29 @@ check("reinstall does not claim nothing arrived", !/nothing callable arrived/.te
 const rereg = registered.filter(t2 => t2.name.endsWith("_fixture_tool")).length
 check("reinstall does not double-register", rereg === 1, "copies registered: " + rereg)
 
+// Reloading a bundle into the same session is the ordinary case (the model
+// installs what another client already installed), and it used to look like
+// failure: the second apply re-registered names the host already holds, cordis
+// threw "service X has been registered", and that was reported as "needs a
+// service this profile does not compose" with an empty tool list - for a bundle
+// whose tools were present and callable the whole time. Three published
+// packages hit exactly this on a real pi run.
+const dshInstall = registered.find(x => x.name === "dsh_install")
+const recallTarget = path.join(ROOT, "scripts", "fixtures", "dsh-recall").replace(/\\/g, "/")
+const r1 = await dshInstall.execute({ source: recallTarget }, {})
+check("first load registers the fixture", r1.ok === true && /tools: recall_echo/.test(String(r1.result)), String(r1.result).replace(/\s+/g, " ").slice(0, 200))
+try { await import("node:fs/promises").then(m => m.readFile) } catch { /* unused */ }
+const r2 = await dshInstall.execute({ source: recallTarget }, {})
+check("reload still succeeds", r2.ok === true, String(r2.result).replace(/\s+/g, " ").slice(0, 220))
+const r2Tools = ((String(r2.result).match(/tools: (\S[^\n]*)/) || [])[1] || "").trim()
+check("reload reports the same tools", r2Tools.includes("recall_echo"), "r2 tools=[" + r2Tools + "]")
+check("reload explains that it was already loaded", /already loaded in this session/.test(String(r2.result)), String(r2.result).replace(/\s+/g, " ").slice(0, 200))
+check("reload never blames a missing service", !/does not compose/.test(String(r2.result)), String(r2.result).slice(0, 200))
+const recallShell = registered.find(x => x.name === "recall_echo")
+if (recallShell) {
+  const ran = await recallShell.execute({ text: "twice" }, {})
+  check("the tool still runs after a reload", ran.ok === true && /RECALL-RAN:twice/.test(String(ran.result)), String(ran.result).slice(0, 160))
+} else check("the tool still runs after a reload", false, "recall_echo not registered")
 const remove = registered.find(t => t.name === "bridge_remove")
 const rm1 = await remove.execute({ source: "npm:definitely-not-real-xyz" }, {})
 check("removing an unknown source says so", /not bridged/.test(String(rm1.result)), String(rm1.result))
