@@ -99,8 +99,6 @@ const dupes = tools.filter((x) => x.name === exact).length
 check('reinstall does not double-register', dupes === 1, 'copies: ' + dupes)
 
 // A tool that fails inside DSH must come back as an error result, not a throw.
-const boom = createServer(() => {})
-void boom
 const failCall = await forwarded.execute('id3', { text: 'x' })
 check('a successful call stays successful', failCall.details.error !== true)
 

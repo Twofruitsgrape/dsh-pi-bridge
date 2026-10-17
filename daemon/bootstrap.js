@@ -31,16 +31,6 @@ const PACKAGES = (() => {
   try { return JSON.parse(process.env.DSH_PI_BRIDGE_PACKAGES || '[]') } catch { return [] }
 })()
 
-/** pi supplies these to extensions; they must resolve to pi's real modules. */
-const HOST_PACKAGES = [
-  '@earendil-works/pi-coding-agent',
-  '@earendil-works/pi-agent-core',
-  '@earendil-works/pi-ai',
-  '@earendil-works/pi-tui',
-  '@earendil-works/pi-mcp',
-  'typebox',
-]
-
 /** Follow a package's own export map to a file path. */
 function pickEntry (exp) {
   if (!exp) return null
@@ -87,7 +77,7 @@ let jiti = null
  * Build a loader that behaves like pi's own extension loading: jiti for TS, with
  * pi's host-provided packages mapped to the real modules pi supplies.
  */
-function makeLoader () {
+async function makeLoader () {
   if (!PI_MODULE_DIR) { loadErrors.push('PI_MODULE_DIR unset: cannot load TypeScript extensions'); return null }
   try {
     const req = createRequire(path.join(PI_MODULE_DIR, 'package.json'))
@@ -102,12 +92,12 @@ function makeLoader () {
     // genuine ExtensionAPI, typebox and model registry, never a stub.
     let selfName = ''
     try { selfName = JSON.parse(readFileSync(path.join(PI_MODULE_DIR, 'package.json'), 'utf8')).name || '' } catch { /* unknown */ }
-    const alias = {}
-    for (const name of HOST_PACKAGES) {
-      const target = resolveHost(req, name, selfName)
-      if (target) alias[name] = target
-      else loadErrors.push('no host module for ' + name)
-    }
+    const { buildAliasTable } = await import(pathToFileURL(path.resolve(HERE, '..', 'src', 'pi-aliases.js')).href)
+    const { alias, missing, skipped } = buildAliasTable(PI_MODULE_DIR)
+    void skipped
+    // A missing entry pi lists only matters when a package asks for it; the real
+    // failures surface as load errors on that package, which is the honest place.
+    if (missing.length) loadErrors.push('alias gaps: ' + missing.join(', '))
     return createJiti ? createJiti(path.join(HERE, 'noop.js'), { moduleCache: false, interop: 'auto', alias })
       : jitiFactory(HERE, { interop: 'auto', tryNative: true, moduleCache: false, alias })
   } catch (e) {
@@ -125,6 +115,23 @@ async function resolveFile (file) {
   if (!jiti) return import(pathToFileURL(file).href)
   if (typeof jiti.import === 'function') return jiti.import(file, { default: false })
   return jiti(file)
+}
+
+/**
+ * The bridge's own argument checks, loaded from src/ so the rules can be tested
+ * without starting pi. Cached after the first call; a failure here must not look
+ * like a package failure, so a broken import falls back to no extra checking.
+ */
+let validators = null
+async function loadValidators () {
+  if (validators) return validators
+  try {
+    validators = await import(pathToFileURL(path.resolve(HERE, '..', 'src', 'validate-args.js')).href)
+  } catch (e) {
+    loadErrors.push('validate-args.js: ' + String(e && e.message).slice(0, 120))
+    validators = { validateArgs: () => null }
+  }
+  return validators
 }
 
 function describe (name, entry) {
@@ -252,6 +259,7 @@ function startServer (pi) {
             notes: notes.slice(-4),
           })
         }
+
         if (url === '/call') {
           const { name, args } = JSON.parse(raw || '{}')
           // Only tools the bridge loaded are callable. ExtensionAPI exposes no
@@ -265,6 +273,8 @@ function startServer (pi) {
           if (!def) return json(res, 200, { ok: false, error: 'unknown tool: ' + name })
           if (typeof def.execute !== 'function') return json(res, 200, { ok: false, error: 'tool has no execute' })
           if (!liveCtx) return json(res, 200, { ok: false, error: 'no extension context captured yet' })
+          const problem = (await loadValidators()).validateArgs(def.parameters, args || {})
+          if (problem) return json(res, 200, { ok: false, rejected: true, error: problem })
           const t0 = Date.now()
           try {
             const out = await def.execute('dsh-pi-bridge', args || {}, undefined, undefined, liveCtx)
@@ -292,6 +302,6 @@ export default async function (pi) {
   for (const ev of ['before_agent_start', 'agent_start', 'turn_start']) {
     pi.on(ev, async (_e, ctx) => { liveCtx = liveCtx || ctx })
   }
-  jiti = makeLoader()
+  jiti = await makeLoader()
   for (const root of PACKAGES) await loadPackage(root, pi)
 }

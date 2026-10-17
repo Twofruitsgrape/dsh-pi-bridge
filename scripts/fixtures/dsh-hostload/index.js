@@ -14,6 +14,24 @@ export const name = 'dsh-hostload-fixture'
 export const inject = ['tools']
 
 export function apply (ctx) {
+  // A bounded slow tool. It exists so a test can hold a live DSH session open on
+  // a real tool call rather than on a sleep the harness hopes to time correctly,
+  // and it exercises the forwarding path with a long-running call: pi waits for
+  // the result instead of giving up at a fixed timeout.
+  ctx.tools.register(defineTool({
+    name: 'hl_hold',
+    description: 'Wait for a bounded number of milliseconds, then confirm.',
+    parameters: { ms: { type: 'number', required: true, description: 'milliseconds to wait' } },
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' }, result: { type: 'string' } } },
+      render: (_a, v) => [{ type: 'text', text: v.result }],
+    },
+    execute: async (a) => {
+      const ms = Math.max(0, Math.min(Number(a.ms) || 0, 300000))
+      await new Promise((r) => setTimeout(r, ms))
+      return { ok: true, result: 'HELD-' + ms }
+    },
+  }))
   ctx.tools.register(defineTool({
     name: 'hl_echo',
     description: 'Echo back, registered by a bundle that was loaded at runtime.',

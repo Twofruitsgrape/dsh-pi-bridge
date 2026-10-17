@@ -33,8 +33,6 @@ export const inject = ['tools']
 
 const REGISTRY_FILE = path.join(CACHE_ROOT, 'bridges.json')
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-/** Where host-rewritten bundles are written: outside every published dir. */
-const genDir = path.join(CACHE_ROOT, 'gen')
 
 /**
  * Tool output in the shape the host's tools service validates directly.
@@ -208,7 +206,6 @@ export async function apply (ctx, config) {
     for (const t of tools || []) {
       const name = prefix + '_' + t.name
       if (shellNames.has(name)) { report.tools.push(name); continue }
-      shellNames.add(name)
       if (!ctx.tools || typeof ctx.tools.register !== 'function') { report.skipped.push('tools service missing; ' + name); continue }
       try {
         ctx.tools.register(tool({
@@ -226,6 +223,9 @@ export async function apply (ctx, config) {
             return { ok: true, result: projected.text || JSON.stringify(projected.structured === undefined ? null : projected.structured) }
           },
         }))
+        // Remembered only on success: a name the host refused is not ours, and
+        // marking it as registered would make a later retry report it as live.
+        shellNames.add(name)
         report.tools.push(name)
       } catch (e) {
         report.skipped.push('tool ' + name + ': ' + message(e))
@@ -312,7 +312,7 @@ export async function apply (ctx, config) {
     output: OUT(),
     execute: guarded(async (args) => {
       const m = await materialize(args.source, { log, refresh: !!args.refresh })
-      const loaded = await loadDshBundle(m.root, ctx, { genDir, log, registered: new Set(hostCallable.keys()) })
+      const loaded = await loadDshBundle(m.root, ctx, { log, registered: new Set(hostCallable.keys()) })
       if (loaded.error) throw new Error(loaded.error)
       for (const t of loaded.tools || []) {
         const def = loaded.callable && loaded.callable.get(t.name)
@@ -334,7 +334,10 @@ export async function apply (ctx, config) {
       lines.push('  dependencies: ' + ((m.dependencies && m.dependencies.status) || 'n/a'))
       lines.push('  tools: ' + (report.tools.length ? report.tools.join(', ') : 'none'))
       lines.push('  commands: ' + (report.commands.length ? report.commands.map((c) => '/' + c).join(', ') : 'none'))
+      if (loaded.skills) lines.push('  skill providers registered: ' + loaded.skills)
       if (loaded.mapped && loaded.mapped.length) lines.push('  host modules rewired: ' + loaded.mapped.join(', '))
+      if (loaded.reused && loaded.reused.length) lines.push('  already registered in this session: ' + loaded.reused.join(', '))
+      for (const c of loaded.conflicts || []) lines.push('  refused by the host: ' + c.name + ' (' + c.reason + ')')
       if (!report.tools.length && !report.commands.length) lines.push('  (the bundle registered nothing: it may be UI-only, or need a service this profile does not compose)')
       return lines.join('\n')
     }),
@@ -459,7 +462,7 @@ export async function apply (ctx, config) {
       load: async (source) => {
         if (!source) throw new Error('no source given')
         const m = await materialize(source, { log })
-        const r = await loadDshBundle(m.root, serveScope, { genDir, log, registered: new Set(hostCallable.keys()) })
+        const r = await loadDshBundle(m.root, serveScope, { log, registered: new Set(hostCallable.keys()) })
         if (r.error) return { error: r.error, tools: [], commands: [] }
         // Tools the session already had are still exposed: they were registered by
         // the user's own dsh_install, and their definitions are in hostCallable.
@@ -471,7 +474,7 @@ export async function apply (ctx, config) {
           const def = r.callable && r.callable.get(t.name)
           if (def) hostCallable.set(t.name, { def, source })
         }
-        return { tools: r.tools, commands: r.commands, name: r.name, version: m.info.version }
+        return { tools: r.tools, commands: r.commands, skills: r.skills, reused: r.reused, name: r.name, version: m.info.version }
       },
       call: async (name, args) => {
         const entry = hostCallable.get(name)

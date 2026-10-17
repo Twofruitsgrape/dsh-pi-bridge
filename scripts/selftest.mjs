@@ -516,6 +516,36 @@ async function main () {
     check('the replay path only sees non-forward entries', /restoreIntoPi\(pi, replayState/.test(src))
   }
 
+  console.log('arguments are checked before a bridged tool runs')
+  {
+    // The bridge used to call a package's execute() directly. Real packages then
+    // failed inside their own code with messages like 'Cannot read properties of
+    // undefined (reading trim)' - seen twice in a batch of twelve published pi
+    // packages - while the receiving host would have said which argument was
+    // missing. These are the checks that replace the crash with that message.
+    const { validateArgs } = await import('../src/validate-args.js')
+    const schema = { type: 'object', properties: { q: { type: 'string' }, n: { type: 'number' }, flag: { type: 'boolean' }, items: { type: 'array' } }, required: ['q'] }
+    check('missing required key is named', validateArgs(schema, {}) === 'missing required key(s): q', validateArgs(schema, {}))
+    check('null counts as missing', /missing required/.test(validateArgs(schema, { q: null }) || ''))
+    check('a complete call passes', validateArgs(schema, { q: 'hi' }) === null, validateArgs(schema, { q: 'hi' }))
+    check('wrong type is reported by name', /q expected string, got number/.test(validateArgs(schema, { q: 5 }) || ''), validateArgs(schema, { q: 5 }))
+    check('number rejects a string', /n expected number/.test(validateArgs(schema, { q: 'a', n: 'x' }) || ''))
+    check('integer rejects a fraction', /expected integer/.test(validateArgs({ type: 'object', properties: { i: { type: 'integer' } }, required: [] }, { i: 1.5 }) || ''))
+    check('array rejects an object', /items expected array/.test(validateArgs(schema, { q: 'a', items: {} }) || ''))
+    check('optional key given as null is tolerated', validateArgs(schema, { q: 'a', n: null }) === null, validateArgs(schema, { q: 'a', n: null }))
+    // additionalProperties:false must reject unknown keys - a package's own schema says so.
+    const strict = { type: 'object', properties: { a: { type: 'string' } }, additionalProperties: false }
+    check('unknown argument rejected when closed', /unknown argument\(s\): b/.test(validateArgs(strict, { a: 'x', b: 1 }) || ''), validateArgs(strict, { a: 'x', b: 1 }))
+    check('open schema allows extra keys', validateArgs({ type: 'object', properties: {} }, { anything: 1 }) === null)
+    // No schema, or a schema the bridge cannot read, must not block a call.
+    check('absent schema checks nothing', validateArgs(null, { q: 1 }) === null)
+    check('non-object args treated as empty', /missing required/.test(validateArgs(schema, 'oops') || ''))
+    // And the daemon must actually call it before execute.
+    const boot = await (await import('node:fs/promises')).readFile(path.join(ROOT, 'daemon', 'bootstrap.js'), 'utf8')
+    check('daemon validates before executing', /const problem = \(await loadValidators\(\)\)\.validateArgs/.test(boot) && /if \(problem\) return json\(res, 200, \{ ok: false, rejected: true/.test(boot))
+    check('a rejected call is labelled as such', /rejected: true/.test(boot))
+  }
+
   console.log('no percent-encoded path derivation')
   {
     // Twice now a file path was derived from new URL(...).pathname, which keeps

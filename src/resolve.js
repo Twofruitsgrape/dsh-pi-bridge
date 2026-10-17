@@ -12,7 +12,7 @@
  *
  * @module src/resolve.js
  */
-import { mkdir, rm, cp, readFile, writeFile, readdir } from 'node:fs/promises'
+import { mkdir, rm, cp, readFile, writeFile, readdir, lstat, realpath } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import os from 'node:os'
@@ -127,9 +127,18 @@ async function fromUrl (url, dest, log) {
 }
 
 async function fromLocal (id, dest, log) {
-  const src = path.resolve(id)
-  log('local: ' + src)
+  const requested = path.resolve(id)
+  // A bundle the plugin manager installed is a symlink into plugin-sources. Copy
+  // the tree it points at, not the link: node:fs cp reported 'Cannot overwrite
+  // directory with non-directory' on two real bundles read this way.
+  let src = requested
+  try { if ((await lstat(requested)).isSymbolicLink()) src = await realpath(requested) } catch { /* as asked */ }
+  log('local: ' + src + (src !== requested ? ' (linked)' : ''))
   await readdir(src).catch(() => { throw new Error('not a directory: ' + src) })
+  // A stale copy of an earlier version must not be merged over: cp cannot replace
+  // a directory with a file, and files the package dropped would survive and still
+  // be imported by the rewritten bundle.
+  await rm(dest, { recursive: true, force: true }).catch(() => {})
   // cp rejects a destination inside its source before consulting any filter, so
   // a self-bridged package (cache within the package) is copied by hand.
   if (isWithin(src, dest)) { await copyTree(src, dest, 0); return }
