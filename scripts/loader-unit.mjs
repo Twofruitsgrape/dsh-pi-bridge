@@ -132,6 +132,99 @@ const { loadDshBundle } = await import('../src/dsh-loader.js')
 const roots = hostModulesRoots("C:/App/DeepSeek Harness.exe")
 check("derives two roots from execPath", roots.length === 2 && roots[0].includes("app.asar") && roots[1].includes("asar.unpacked"), JSON.stringify(roots))
 
+// The scope must see service entries that land AFTER it was built. Measured live
+// on a GUI boot: the caller probes webServer through async ctx.inject callbacks
+// that settle after apply() finished the synchronous part, and a scope that
+// copied the snapshot at creation time reported "does not compose webServer"
+// for a session that had been serving a browser UI on that service all along.
+{
+  const store = { tools: { register: () => ({ dispose () {} }) } }
+  const scope = createDetachedScope(store)
+  store.webServer = { ok: true }
+  const seen = []
+  const handle = scope.inject(["webServer"], (inner) => { seen.push(!!inner.webServer.ok) })
+  check("a service added to the snapshot after creation is mountable",
+    seen.length === 1 && seen[0] === true && handle && typeof handle.dispose === 'function',
+    JSON.stringify(seen))
+}
+
+// ctx.plugin() must work the way cordis does, because a published bundle composes
+// helper plugins through it (measured: dsh-univer-office died with
+// "ctx.plugin is not a function" on the serve path). Three parts: it runs the
+// apply, it declines a service the snapshot lacks exactly like inject, and a
+// spawned rejection never escapes unhandled.
+{
+  const registered = []
+  const scope = createDetachedScope({
+    tools: { register: (d) => { registered.push(d.name); return { dispose () {} } } },
+  })
+
+  let unused = true
+  const plain = typeof scope.plugin === 'function' ? scope.plugin(() => { unused = false }) : undefined
+  check("plugin runs a declarative apply without inject", unused === false && plain && typeof plain.dispose === 'function', String(typeof plain))
+
+  let spawned = false
+  const handle = scope.plugin({
+    inject: ['tools'],
+    apply: (child) => { spawned = true; child.tools.register({ name: 'from-plugin' }) },
+  }, {})
+  check("plugin composes declared services and passes a real child scope",
+    spawned && registered.indexOf('from-plugin') >= 0 && handle !== undefined,
+    'spawned=' + spawned)
+
+  const missingRun = scope.plugin({ inject: ['fs'], apply: () => { spawned = true } }, {})
+  check("plugin declines a service the snapshot lacks", missingRun === undefined, String(missingRun))
+  check("the declined plugin never ran", spawned === true, JSON.stringify(registered))
+
+  // The univer-office shape: the bundle composes a helper plugin from INSIDE
+  // its own inject callback. Measured live, the inject child scope carried no
+  // plugin and the inner callback died with "ctx.plugin is not a function".
+  const inner = []
+  const nested = createDetachedScope({
+    tools: { register: (d) => { inner.push(d.name); return { dispose () {} } } },
+  })
+  nested.inject(['tools'], (child) => {
+    child.plugin((c) => { c.tools.register({ name: 'nested-helper' }) })
+  })
+  check("an inject child scope can compose further plugins",
+    inner.indexOf('nested-helper') >= 0, JSON.stringify(inner))
+
+  let rejection = null
+  const unhandled = (e) => { rejection = String((e && e.message) || e).slice(0, 60) }
+  process.on('unhandledRejection', unhandled)
+  const rejecting = scope.plugin({
+    inject: ['tools'],
+    apply: async () => { throw new Error('PLUGIN FIXTURE REJECTED ON PURPOSE') },
+  }, {})
+  let caught = null
+  try { await rejecting } catch (e) { caught = String((e && e.message) || e).slice(0, 60) }
+  await new Promise((res) => setTimeout(res, 200))
+  check("a spawned rejecting plugin rethrows to the awaiting caller",
+    caught !== null && /PLUGIN FIXTURE REJECTED ON PURPOSE/.test(caught), JSON.stringify(caught))
+  check("a spawned rejecting plugin does not escape as an unhandled rejection",
+    rejection === null, JSON.stringify(rejection))
+  process.off('unhandledRejection', unhandled)
+}
+
+// A bundle that subclasses the HOST's own cordis Service registers its instance
+// through ctx.reflect.provide - measured live: dsh-univer-office defines
+// `UniverService extends Service` whose constructor ends with
+// `self.ctx.reflect.provide(name, self, check)`; without a reflect view the
+// load died reading `.provide` of undefined. The service must land in the
+// shared store so a later inject can circulate it.
+{
+  const scope = createDetachedScope({})
+  const svc = { ok: true }
+  scope.reflect.provide('univer', svc, () => true)
+  let saw = false
+  scope.inject(['univer'], (c) => { saw = c.univer === svc })
+  check("reflect.provide lands a service the snapshot can circulate", saw, String(saw))
+  check("reflect.define registers under the same store",
+    scope.missing(['defined-thing']).length === 1 &&
+    scope.reflect.define('defined-thing', 1) !== undefined &&
+    scope.missing(['defined-thing']).length === 0, '')
+}
+
 console.log("")
 console.log(fails ? "LOADER UNIT FAILED (" + fails + ")" : "LOADER UNIT PASSED")
 process.exitCode = fails ? 1 : 0

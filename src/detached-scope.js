@@ -36,7 +36,21 @@
  */
 export function createDetachedScope (snapshot, opts) {
   const log = (opts && opts.log) || (() => {})
-  const services = Object.assign(Object.create(null), snapshot || {})
+  /**
+   * Keep the caller's object by reference, not a copy.
+   *
+   * A copy here was measured as the whole missing-service symptom of the
+   * "GUI 重新测一批" round: the caller collects its service snapshot partly
+   * through async inject probes whose callbacks settle in later microtasks,
+   * while this scope was created synchronously inside apply(). Copying at that
+   * instant preserves an almost-empty service store, and every probe result
+   * that lands afterwards is silently invisible to this scope - which then
+   * reports 'does not compose webServer' for a session that had been serving a
+   * browser UI on that service for minutes. Sharing the same object keeps
+   * late-arriving service entries visible at every later load, which is what
+   * the caller's probe design assumes.
+   */
+  const services = snapshot || Object.create(null)
   /** Cleanups the bundles registered through effect(), in registration order. */
   const cleanups = []
   /** Every scope handed out, so dispose() can tear down deferred children too. */
@@ -87,6 +101,17 @@ export function createDetachedScope (snapshot, opts) {
       child.on = base.on
       child.once = base.once
       child.emit = base.emit
+      // The child scope needs the full shim surface, not just the event
+      // methods: a bundle composes helper plugins from INSIDE an inject
+      // callback (measured live: dsh-univer-office's apply injected
+      // [tools, web], and its inner callback died with "ctx.plugin is not a
+      // function" because the inject child carried no plugin). provide and
+      // missing belong here for the same reason - an inner callback can
+      // register a service and ask what is absent just like a top-level one.
+      child.provide = base.provide
+      child.plugin = base.plugin
+      child.missing = base.missing
+      child.reflect = base.reflect
       children.push(child)
       // Propagate a throwing callback: a bundle that fails while registering is
       // the bundle problem and the loader reports it with the bundle name.
@@ -126,6 +151,63 @@ export function createDetachedScope (snapshot, opts) {
       return list.filter((n) => services[n] === undefined)
     },
     provide (name, value) { services[name] = value; return value },
+    /**
+     * The reflect view real cordis contexts expose. A bundle that subclasses
+     * the HOST's own Service class constructs its service through
+     * ctx.reflect.provide - measured live: dsh-univer-office defines
+     * `UniverService extends Service` (the host cordis), whose constructor
+     * ends with `self.ctx.reflect.provide(name, self, check)` and died here
+     * with "Cannot read properties of undefined (reading 'provide')" until
+     * this view existed. The three-argument call shape is accepted; the
+     * auto-dispose-on-fiber-unload the third argument carries does not apply
+     * because there is no fiber, so a provided service lives until dispose()
+     * tears the scope down - the same lifetime provide() above gives.
+     */
+    reflect: {
+      provide (name, value) { services[name] = value; return value },
+      define (name, value) { services[name] = value; return value },
+    },
+    /**
+     * Cordis ctx.plugin(p, config) mounts a further plugin - measured live:
+     * dsh-univer-office rejected with "ctx.plugin is not a function" because
+     * its apply() composes helper plugins that way. Mirror the resolve() step of
+     * the real cordis: a function is the apply itself (inject may ride on
+      * `.inject`), an object contributes `.apply`. The declared names gate the
+      * call the same way inject does, the child scope resolves the snapshot's
+      * services the way a cordis child context does, and a provided service
+      * lands in the shared store so the rest of the load can see it.
+     *
+     * A spawned apply that rejects must not escape as an unhandled rejection:
+     * the same measured failure that the inject path guards against. The
+     * returned promise rethrows for an awaiting caller while also carrying an
+     * internal catch that logs - attaching a handler on the *same* promise keeps
+     * a spawned-and-forgotten failure visible without killing the host, and
+     * does not change what an awaiting caller receives.
+     */
+    plugin (p, config) {
+      const resolved = typeof p === 'function' ? p : (p && typeof p === 'object' ? p : null)
+      const applyFn = resolved === null ? undefined : (typeof resolved === 'function' ? resolved : resolved.apply)
+      if (typeof applyFn !== 'function') throw new Error('invalid plugin, expect function or object with an "apply" method, received ' + (resolved === null ? String(p) : typeof applyFn))
+      const declared = Array.isArray(resolved.inject) ? resolved.inject.slice() : []
+      if (declared.some((n) => services[n] === undefined)) return undefined
+      const child = {}
+      // A cordis plugin child resolves the parent's services through the
+      // injector, so a spawned helper that declared no inject still sees the
+      // snapshot (measured: the first version handed the child only the
+      // declared names and loader-unit's nested-plugin check crashed on
+      // c.tools.register - "Cannot read properties of undefined"). The
+      // declared names still gate whether the helper runs at all.
+      for (const [n, v] of Object.entries(services)) child[n] = v
+      for (const k of ['effect', 'on', 'once', 'emit', 'inject', 'provide', 'plugin', 'missing', 'reflect']) child[k] = base[k]
+      children.push(child)
+      const out = applyFn(child, config)
+      if (out && typeof out.then === 'function') {
+        const chained = out.then(() => ({ dispose () {} }), (e) => { throw e })
+        chained.catch((e) => { log('detached plugin rejected: ' + String((e && e.message) || e).slice(0, 120)) })
+        return chained
+      }
+      return { dispose () {} }
+    },
   }
   for (const [k, v] of Object.entries(services)) base[k] = v
 

@@ -194,15 +194,44 @@ export async function apply (ctx, config) {
    * composed and a snapshot-only view said the same thing for services the session
    * genuinely had, which is a refusal the user cannot act on.
    */
-  const CANDIDATES = ['web', 'webServer', 'fs', 'sessionPersistence', 'credentials', 'connection', 'agentDefaultModel', 'model', 'channels', 'dialogs', 'prompt', 'gui', 'browser', 'typert', 'workspaceRegistry', 'sessionProjectionCache', 'http', 'profile', 'registry', 'hot', 'scopes', 'resolve', 'paths', 'jobs']
-  for (const name of CANDIDATES) {
-    if (serviceSnapshot[name] !== undefined) continue
+  const CANDIDATES = ['web', 'webServer', 'fs', 'sessionPersistence', 'credentials', 'connection', 'agentDefaultModel', 'model', 'channels', 'dialogs', 'prompt', 'gui', 'browser', 'typert', 'workspaceRegistry', 'sessionProjectionCache', 'http', 'profile', 'registry', 'hot', 'scopes', 'resolve', 'paths', 'jobs', 'llm', 'commands', 'skills', 'webApp', 'webRuntime']
+  /**
+   * Collect every probe before the snapshot is handed to the detached scope.
+   *
+   * Two measured facts force the await. First, each candidate runs through
+   * ctx.inject, which spawns a child plugin whose callback settles in a later
+   * microtask - on this host the callbacks do run, and they arrive after this
+   * point. Second, the detached scope became a live reference, so a probe that
+   * settles after the scope was built would still be visible - but a probe
+   * killed by the host's own plugin-fiber disposal would NOT, and disposal
+   * cases were measured (uid=78 state=1 at apply, uid=null state=4 at request).
+   * Awaiting here keeps the collection inside the window the host guarantees
+   * (an apply that has not returned yet), with a hard cap so a session that
+   * genuinely does not compose a service still boots: the wait is bounded by
+   * PROBE_CAP_MS per candidate, in parallel, and the outcome of each one is
+   * recorded for the debug report instead of disappearing into a swallowed
+   * catch.
+   */
+  const probeOutcomes = {}
+  const PROBE_CAP_MS = 2500
+  await Promise.allSettled(CANDIDATES.map((name) => new Promise((resolve) => {
+    probeOutcomes[name] = 'launched'
+    let done = (why) => { probeOutcomes[name] = why; resolve() }
+    const timer = setTimeout(() => done(probeOutcomes[name] === 'fired' ? 'fired' : 'no-callback-by-cap'), PROBE_CAP_MS)
     try {
-      ctx.inject([name], (inner) => {
-        try { const v = inner[name]; if (v !== undefined) serviceSnapshot[name] = v } catch { /* unreadable */ }
+      const handle = ctx.inject([name], (inner) => {
+        try {
+          const value = inner[name]
+          if (value !== undefined) serviceSnapshot[name] = value
+          probeOutcomes[name] = value !== undefined ? 'fired' : 'callback-ran-null'
+        } catch (e) { probeOutcomes[name] = 'callback-unreadable: ' + String((e && e.message) || e).slice(0, 60) }
+        if (probeOutcomes[name] !== 'launched' && probeOutcomes[name] !== 'no-callback-by-cap') { clearTimeout(timer); resolve() }
       })
-    } catch { /* the profile does not compose it: leave it absent */ }
-  }
+      if (handle && typeof handle.then === 'function') {
+        handle.then(() => { /* callback or settle - the callback recorded its own outcome */ }, (e) => done('inject-error: ' + String((e && e.message) || e).slice(0, 70)))
+      }
+    } catch (e) { done('threw: ' + String((e && e.message) || e).slice(0, 70)) }
+  })))
     /**
    * The scope the serve endpoint mounts bundles into: the snapshot, detached from
    * any fiber. See src/detached-scope.js for the measurement that forced this.
@@ -579,6 +608,7 @@ export async function apply (ctx, config) {
       load: async (source) => {
         if (!source) throw new Error('no source given')
         let scopeProbe = [fiberAtApply, fiberState('detached', detachedScope), fiberState('bridge-ctx', ctx)].filter(Boolean).join(' | ')
+        scopeProbe += ' snapshot=' + JSON.stringify(Object.keys(serviceSnapshot)) + ' probes=' + JSON.stringify(probeOutcomes)
         // Does ctx.inject on the root scope actually run its callback? The mount
         // now passes assertActive (root fiber is uid=0 ACTIVE) but the loader
         // reported 'registrations would go nowhere', which is this bridge's wording

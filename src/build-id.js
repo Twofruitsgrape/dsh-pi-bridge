@@ -40,6 +40,7 @@ const WATCHED = [
   'src/pi-aliases.js',
   'src/self-ref.js',
   'src/dsh-loader.js',
+  'src/detached-scope.js',
   'src/serve.js',
   'src/dsh-host-client.js',
   'src/build-id.js',
