@@ -27,6 +27,7 @@ import { loadDshBundle } from './src/dsh-loader.js'
 import { startDshServer } from './src/serve.js'
 import { projectResult } from './src/capabilities.js'
 import { CACHE_ROOT } from './src/resolve.js'
+import { createDetachedScope } from './src/detached-scope.js'
 
 export const name = 'dsh-pi-bridge'
 export const inject = ['tools']
@@ -185,6 +186,64 @@ export async function apply (ctx, config) {
       return target[prop]
     },
   })
+
+  /**
+   * The scope the serve endpoint mounts bundles into: the snapshot, detached from
+   * any fiber. See src/detached-scope.js for the measurement that forced this.
+   */
+  const detachedScope = createDetachedScope(serviceSnapshot, { log })
+
+  /**
+   * Which fiber is this scope riding on, and is it still active?
+   *
+   * Under DSH_PI_BRIDGE_DEBUG=1 both load paths report this, plus a snapshot taken
+   * here at apply time. The point is timing, not identity: serveScope is a Proxy
+   * over ctx, so the two paths share one fiber, and cordis' assertActive() fails
+   * only when that fiber's uid has become null. Recording the state while apply()
+   * is running and again when a request arrives is what distinguishes 'this
+   * profile never composed the service' (what this bridge kept reporting) from
+   * 'the bridge own fiber was disposed by the time the call arrived' - the frames
+   * pointed at the latter, and the tool path is known to work in the same session.
+   */
+  const fiberState = (label, scope) => {
+    if (process.env.DSH_PI_BRIDGE_DEBUG !== '1') return null
+    const c = scope || ctx
+    try {
+      const f = c && c.fiber
+      return label + ': uid=' + JSON.stringify(f && f.uid) + ' state=' + JSON.stringify(f && f.state)
+        + ' inject=' + typeof (c && c.inject)
+    } catch (e) { return label + ': read THREW ' + String((e && e.message) || e).slice(0, 70) }
+  }
+  // Only worth a log line when debugging; otherwise this prints on every boot.
+  const fiberAtApply = fiberState('apply')
+  if (fiberAtApply) log('bridge fiber at apply: ' + fiberAtApply)
+
+  /**
+   * The scope bundles are mounted into: the session root, not this plugin's own.
+   *
+   * Measured on a live session with DSH_PI_BRIDGE_DEBUG=1: at apply() the bridge
+   * fiber was uid=78 state=1, and by the time an HTTP request arrived the same
+   * fiber was uid=null state=4 - DISPOSED (the host disposes a plugin instance's
+   * fiber on hot-reload, while the serve endpoint this bridge opened keeps calling
+   * through the old closure's ctx). cordis' plugin() starts with
+   * ctx.fiber.assertActive(), so every mount after that threw INACTIVE_EFFECT -
+   * for every bundle, including this bridge's own fixture. The tool path kept
+   * working because the host invokes tools on an active fiber, which is exactly
+   * the asymmetry that made the profile explanation look plausible for so long.
+   *
+   * The root context's fiber is created uid=0 ACTIVE (cordis lib/index.js:382-384)
+   * and is where the host mounts plugins itself; a real-cordis experiment shows
+   * inject + effect + register all succeed there after the bridge fiber dies. An
+   * effect opened there belongs to the session, which is the honest lifetime for a
+   * runtime-installed bundle anyway.
+   */
+  const mountScope = (() => {
+    try {
+      const r = ctx && ctx.root
+      if (r && typeof r.inject === 'function') return r
+    } catch { /* a host without a root handle: fall through to the proxy */ }
+    return serveScope
+  })()
 
   /**
    * Register one DSH forwarding tool per capability pi just loaded. Parameters
@@ -376,8 +435,16 @@ export async function apply (ctx, config) {
             .concat(['  dependencies: ' + ((m.dependencies && m.dependencies.status) || 'n/a')], formatLoaded(recalled)).join('\n')
         }
       }
+      // The host invokes a tool on an active fiber, so the plugin's own ctx works
+      // here and is what live sessions have loaded bundles with (dsh-mnemon: 17
+      // tools). It is NOT valid on the serve path, whose callback runs after this
+      // plugin's fiber has been disposed - measured as uid=78 at apply, uid=null
+      // at request - and that mount uses the detached snapshot scope instead.
       const loaded = await loadDshBundle(m.root, ctx, { cacheRoot: CACHE_ROOT, log, registered: new Set(hostCallable.keys()) })
-      if (loaded.error) throw new Error(loaded.error)
+      if (loaded.error) {
+        const where = fiberState('tool-path-after-load', ctx)
+        throw new Error(loaded.error + (where ? ' [' + where + ']' : ''))
+      }
       for (const t of loaded.tools || []) {
         const def = loaded.callable && loaded.callable.get(t.name)
         if (def) hostCallable.set(t.name, { def, source: args.source })
@@ -520,12 +587,41 @@ export async function apply (ctx, config) {
       list: () => [...hostCallable.keys()],
       load: async (source) => {
         if (!source) throw new Error('no source given')
+        let scopeProbe = [fiberAtApply, fiberState('mount-scope', mountScope), fiberState('bridge-ctx', ctx)].filter(Boolean).join(' | ')
+        // Does ctx.inject on the root scope actually run its callback? The mount
+        // now passes assertActive (root fiber is uid=0 ACTIVE) but the loader
+        // reported 'registrations would go nowhere', which is this bridge's wording
+        // for "the callback never ran". Ask directly, with the simplest possible
+        // service, and record what the handle does: awaiting it should settle the
+        // child fiber, and the flag says whether apply-equivalent executed. Without
+        // this the next guess would be a fourth wrong one.
+        if (process.env.DSH_PI_BRIDGE_DEBUG === '1') {
+          const probe = { ran: false, handle: 'none', awaited: 'not-awaited', direct: 'n/a' }
+          try {
+            probe.direct = typeof mountScope.tools
+            const h = mountScope.inject(['tools'], () => { probe.ran = true })
+            probe.handle = h === undefined ? 'undefined' : typeof h
+            if (h && typeof h.then === 'function') {
+              probe.awaited = await Promise.race([
+                h.then(() => 'settled', (e) => 'rejected: ' + String((e && e.message) || e).slice(0, 70)),
+                new Promise((r) => setTimeout(() => r('TIMEOUT 3000ms'), 3000)),
+              ])
+            }
+          } catch (e) { probe.error = String((e && e.message) || e).slice(0, 120) }
+          scopeProbe += ' || inject-probe: ran=' + probe.ran + ' handle=' + probe.handle + ' awaited=' + probe.awaited
+            + ' tools=' + probe.direct + (probe.error ? ' threw=' + probe.error : '')
+        }
         const key = bundleKey(source)
         const m = await materialize(source, { log })
         const recalled = recallBundle(key)
         if (recalled) return { ok: true, ...recalled, error: undefined }
-        const r = await loadDshBundle(m.root, serveScope, { cacheRoot: CACHE_ROOT, log, registered: new Set(hostCallable.keys()) })
-        if (r.error) return { error: r.error, tools: [], commands: [] }
+        const r = await loadDshBundle(m.root, detachedScope, { cacheRoot: CACHE_ROOT, log, registered: new Set(hostCallable.keys()) })
+        // Carry every diagnostic the loader produced. This line used to rebuild a
+        // minimal { error, tools, commands } object, which silently dropped the
+        // debug stack the loader had been asked to capture - so a session run with
+        // DSH_PI_BRIDGE_DEBUG=1 still reported '(none)' and the refusal stayed
+        // unexplained. Pass the result through instead of curating it here.
+        if (r.error) return { ...r, tools: [], commands: [], skills: 0, scopeProbe }
         // Tools the session already had are still exposed: they were registered by
         // the user's own dsh_install, and their definitions are in hostCallable.
         for (const n of r.reused || []) {

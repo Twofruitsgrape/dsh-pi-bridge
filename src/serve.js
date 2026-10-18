@@ -11,6 +11,11 @@
  * @module src/serve.js
  */
 import { createServer } from 'node:http'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { buildFingerprint } from './build-id.js'
+
+const HERE = path.dirname(fileURLToPath(import.meta.url))
 
 const REGEX_PORT = /^127\.0\.0\.1$|::1$/
 
@@ -19,6 +24,9 @@ const REGEX_PORT = /^127\.0\.0\.1$|::1$/
  * @param {{load:(source:string)=>Promise<any>, call:(name:string,args:any)=>Promise<any>, list:()=>any[]}} handlers
  * @returns {{close:()=>void, port:number}|null}
  */
+/** Digest of the bridge modules this process loaded; see src/build-id.js. */
+const BRIDGE_VERSION = buildFingerprint(path.resolve(HERE, '..'))
+
 export function startDshServer (port, handlers) {
   if (!port || !Number.isFinite(port)) return null
   const held = new Map()
@@ -29,7 +37,13 @@ export function startDshServer (port, handlers) {
       const url = (req.url || '/').split('?')[0]
       const send = (obj) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)) }
       try {
-        if (url === '/health') return send({ ok: true, pid: process.pid, serve: true, tools: handlers.list().length })
+        if (url === '/health') {
+          // The fingerprint of the bridge code this session is running. A DSH
+          // session outlives edits to the installed copy just as the pi daemon
+          // does, and measuring through one that predates the change silently
+          // reports the previous build's behaviour - twice now, once on each side.
+          return send({ ok: true, pid: process.pid, serve: true, tools: handlers.list().length, bridgeVersion: BRIDGE_VERSION })
+        }
         if (url === '/tools') return send({ ok: true, tools: handlers.list() })
         const body = raw ? JSON.parse(raw) : {}
         if (url === '/load') {

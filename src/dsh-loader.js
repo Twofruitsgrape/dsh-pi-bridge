@@ -213,6 +213,8 @@ export async function loadDshBundle (dir, ctx, opts) {
     if (typeof ctx.inject === 'function') {
       let composed = false
       let lastError = null
+      // The frames behind a refused load, kept only under DSH_PI_BRIDGE_DEBUG=1.
+      let debugStack = null
       for (const names of attempts) {
         // Whether the callback ran is the evidence, not the return value: the host
         // hands back a dispose object, a stand-in scope hands back whatever apply()
@@ -233,6 +235,14 @@ export async function loadDshBundle (dir, ctx, opts) {
       }
       if (!composed) {
         const msg = String((lastError && (lastError.message || lastError)) || '')
+        if (lastError && process.env.DSH_PI_BRIDGE_DEBUG === '1' && lastError.stack) {
+          // A cause this bridge cannot name from the message alone has to show its
+          // frames: seven published bundles failed with 'cannot create effect on
+          // inactive context', which this file's attribution reported as 'this
+          // profile does not compose <service>'. Four wrong guesses in a row is
+          // the signal that the message was never going to be enough.
+          debugStack = String(lastError.stack).split('\n').slice(1, 9).map((s) => s.trim()).join(' <- ')
+        }
         if (lastError) {
           // Three causes read alike unless the message is inspected, and guessing
           // wrong sends the user off to fix something that is not broken:
@@ -249,6 +259,7 @@ export async function loadDshBundle (dir, ctx, opts) {
           return {
             name: info.name, tools: [], commands: [], skills: 0, mapped: [], deferred: flags.deferred,
             alreadyLoaded: alreadyRegistered,
+            debugStack,
             error: configBound
               ? 'needs configuration the host binds from its Config schema and patch row (apply() reads config.<field>.get()), which a runtime load cannot fabricate - mount it as a profile bundle instead: ' + msg.slice(0, 120)
               : alreadyRegistered

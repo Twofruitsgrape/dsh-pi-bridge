@@ -14,7 +14,7 @@
  *
  * Run: node tools/batch-dsh-to-pi.mjs
  */
-import { dshHostStatus, dshHostLoad, dshHostCall, dshParamsToSchema } from '../src/dsh-host-client.js'
+import { dshHostStatus, dshHostLoad, dshHostCall, dshParamsToSchema, staleSession } from '../src/dsh-host-client.js'
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -48,7 +48,14 @@ if (!(health && health.ok && health.serve)) {
   await log('start one with DSH_PI_BRIDGE_DSH_SERVE=43191 and a prompt that calls dsh_install first')
   process.exit(0)
 }
-await log('live DSH session: pid=' + health.pid)
+// Same guard as the pi-side harness: a stale session must abort loudly rather
+// than be recorded as a batch of failures. See src/dsh-host-client.js.
+const stale = staleSession(health)
+if (stale) {
+  await log('ABORT (stale session, not a result): ' + stale)
+  process.exit(8)
+}
+await log('live DSH session: pid=' + health.pid + ' bridge=' + health.bridgeVersion)
 
 // What to load. Three shapes, all resolved by the product path (the bridge's own
 // resolver: npm tarball, shallow git clone, or a local directory copy):

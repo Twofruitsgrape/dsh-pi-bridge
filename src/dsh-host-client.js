@@ -14,6 +14,13 @@
  * @module src/dsh-host-client.js
  */
 import http from 'node:http'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { buildFingerprint } from './build-id.js'
+
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+/** Digest of the bridge code this process is running. */
+const OUR_VERSION = buildFingerprint(path.resolve(HERE, '..'))
 import { toToolSchema } from './schema.js'
 
 const HOST = '127.0.0.1'
@@ -49,6 +56,30 @@ function request (method, route, body, ms, endpoint) {
 
 export function dshHostStatus (options) {
   return request('GET', '/health', null, 8000, options && options.endpoint)
+}
+
+/**
+ * Refuse to measure through a DSH session running older bridge code.
+ *
+ * Twice in one day a result looked like a defect and was really this: a session
+ * booted before an edit kept answering on the previous build, so the fix under
+ * test was not the code being exercised. The first time I only caught it by
+ * hand. A load report that omits a field the current build always sends is
+ * evidence enough to stop and say so rather than to record the wrong verdict.
+ *
+ * @param {any} health a /health reply
+ * @returns {string|null} a message when the session must not be used
+ */
+export function staleSession (health, ourVersion = OUR_VERSION) {
+  if (!health || !health.ok || !health.serve) return null
+  if (!ourVersion) return null
+  if (!health.bridgeVersion) {
+    return 'the live DSH session reports no bridge fingerprint, so it predates this build; restart it before measuring'
+  }
+  if (health.bridgeVersion !== ourVersion) {
+    return 'the live DSH session runs bridge ' + health.bridgeVersion + ' but this is ' + ourVersion + '; restart it before measuring'
+  }
+  return null
 }
 
 export function dshHostTools (options) {

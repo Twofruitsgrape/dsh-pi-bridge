@@ -1,0 +1,11 @@
+{
+  "name": "dsh-introspect-fixture",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./index.js",
+  "keywords": [
+    "dsh",
+    "dsh-plugin"
+  ],
+  "description": "Fixture: reports what the live host scope offers, from inside a running session."
+}

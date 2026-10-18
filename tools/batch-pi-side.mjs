@@ -12,7 +12,7 @@
  * Run while a DSH session is serving:
  *   DSH_PI_BRIDGE_DSH_ENDPOINT=127.0.0.1:43191 node tools/batch-pi-side.mjs [list.json]
  */
-import { dshHostStatus, dshParamsToSchema } from '../src/dsh-host-client.js'
+import { dshHostStatus, dshParamsToSchema, staleSession } from '../src/dsh-host-client.js'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readFile, mkdir, rm, writeFile, appendFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
@@ -44,7 +44,17 @@ if (!(health && health.ok && health.serve)) {
   await log('SKIP: no live DSH session serving (' + JSON.stringify(health).slice(0, 150) + ')')
   process.exit(0)
 }
-await log('live DSH session pid=' + health.pid)
+/*
+ * A session booted before the current code is not a test subject. Exit non-zero
+ * and say why: treating it as a run produced a "0 of 10 loaded" summary that
+ * looked like ten package defects and was really one stale process.
+ */
+const stale = staleSession(health)
+if (stale) {
+  await log('ABORT (stale session, not a result): ' + stale)
+  process.exit(8)
+}
+await log('live DSH session pid=' + health.pid + ' bridge=' + health.bridgeVersion)
 
 // The product entry, driven the way pi drives it.
 const mod = await import(pathToFileURL(path.join(ROOT, 'extensions', 'index.js')).href)

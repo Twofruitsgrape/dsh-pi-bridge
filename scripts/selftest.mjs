@@ -894,6 +894,32 @@ async function main () {
     })())
   }
 
+  console.log('a stale DSH session aborts the measurement')
+  {
+    // The mirror-image of the daemon check, and it had to be learned the hard
+    // way twice: a batch of ten published bundles reported 0 loads and the
+    // session was running the copy synced before the fixes, so the result
+    // described a process that no longer existed. The guard turns that into a
+    // loud abort instead of a fake measurement.
+    const { staleSession } = await import('../src/dsh-host-client.js')
+    const { buildFingerprint } = await import('../src/build-id.js')
+    const here = buildFingerprint(ROOT)
+    check('an unstamped session is refused', /predates this build/.test(String(staleSession({ ok: true, serve: true, pid: 1 }))), String(staleSession({ ok: true, serve: true, pid: 1 })))
+    check('a mismatched session is refused', /but this is/.test(String(staleSession({ ok: true, serve: true, bridgeVersion: 'deadbeef0000' }))))
+    check('a matching session is accepted', staleSession({ ok: true, serve: true, bridgeVersion: here }) === null)
+    check('a session that is not serving is not called stale', staleSession({ ok: true, serve: false }) === null)
+    const pkg = JSON.parse(await (await import('node:fs/promises')).readFile(path.join(ROOT, 'package.json'), 'utf8'))
+    check('serve stamps health with the digest', await (async () => {
+      const src = await (await import('node:fs/promises')).readFile(path.join(ROOT, 'src', 'serve.js'), 'utf8')
+      return src.includes('bridgeVersion: BRIDGE_VERSION') && src.includes('BRIDGE_VERSION = buildFingerprint(')
+    })(), pkg.version)
+    // Both batch harnesses must refuse rather than record a stale run.
+    for (const tool of ['batch-pi-side.mjs', 'batch-dsh-to-pi.mjs']) {
+      const src = await (await import('node:fs/promises')).readFile(path.join(ROOT, 'tools', tool), 'utf8')
+      check(tool + ' aborts on a stale session', src.includes('staleSession(health)') && /ABORT \(stale session/.test(src))
+    }
+  }
+
   console.log('caches stay outside the published tree')
   {
     // A 1.9 GB npm-install tree once landed under scripts/: files:["scripts"] would
