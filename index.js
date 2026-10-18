@@ -177,17 +177,33 @@ export async function apply (ctx, config) {
    * gives the background path something stable to use.
    */
   const serviceSnapshot = {}
-  for (const key of new Set(['tools', 'commands', 'skills', 'llm', 'sessions', 'settings', 'agent', 'workspace', 'subagents', 'events', 'logger'].concat(Object.keys(ctx || [])))) {
-    try { const value = ctx[key]; if (value !== undefined) serviceSnapshot[key] = value } catch { /* not composed in this profile */ }
+  const ownNames = new Set(['tools', 'commands', 'skills', 'llm', 'sessions', 'settings', 'agent', 'workspace', 'subagents', 'events', 'logger'].concat(Object.keys(ctx || [])))
+  for (const key of ownNames) {
+    try { const value = ctx[key]; if (value !== undefined) serviceSnapshot[key] = value } catch { /* not declared by this fiber */ }
   }
-  const serveScope = new Proxy(ctx, {
-    get (target, prop) {
-      if (prop in serviceSnapshot) return serviceSnapshot[prop]
-      return target[prop]
-    },
-  })
-
   /**
+   * Names bundles asked for on live hosts, gathered from this session's own
+   * refusals. The point of asking the host for each one is that this plugin
+   * declares only 'tools', and a cordis scope refuses a service its fiber did not
+   * declare - so a plain read of ctx.webServer says nothing about whether the
+   * PROFILE composes webServer. ctx.inject([name], cb) is the one call that answers
+   * that question honestly: the callback runs only when the name composes. Doing
+   * it here, while apply() is running, is the only moment it can be done at all.
+   *
+   * Without this, a headless session told a GUI bundle that 'webServer' was not
+   * composed and a snapshot-only view said the same thing for services the session
+   * genuinely had, which is a refusal the user cannot act on.
+   */
+  const CANDIDATES = ['web', 'webServer', 'fs', 'sessionPersistence', 'credentials', 'connection', 'agentDefaultModel', 'model', 'channels', 'dialogs', 'prompt', 'gui', 'browser', 'typert', 'workspaceRegistry', 'sessionProjectionCache', 'http', 'profile', 'registry', 'hot', 'scopes', 'resolve', 'paths', 'jobs']
+  for (const name of CANDIDATES) {
+    if (serviceSnapshot[name] !== undefined) continue
+    try {
+      ctx.inject([name], (inner) => {
+        try { const v = inner[name]; if (v !== undefined) serviceSnapshot[name] = v } catch { /* unreadable */ }
+      })
+    } catch { /* the profile does not compose it: leave it absent */ }
+  }
+    /**
    * The scope the serve endpoint mounts bundles into: the snapshot, detached from
    * any fiber. See src/detached-scope.js for the measurement that forced this.
    */
@@ -197,9 +213,9 @@ export async function apply (ctx, config) {
    * Which fiber is this scope riding on, and is it still active?
    *
    * Under DSH_PI_BRIDGE_DEBUG=1 both load paths report this, plus a snapshot taken
-   * here at apply time. The point is timing, not identity: serveScope is a Proxy
-   * over ctx, so the two paths share one fiber, and cordis' assertActive() fails
-   * only when that fiber's uid has become null. Recording the state while apply()
+   * here at apply time. The point is timing, not identity: both paths rode the same
+   * fiber, and cordis' assertActive() fails only when that fiber's uid has become
+   * null. Recording the state while apply()
    * is running and again when a request arrives is what distinguishes 'this
    * profile never composed the service' (what this bridge kept reporting) from
    * 'the bridge own fiber was disposed by the time the call arrived' - the frames
@@ -218,32 +234,7 @@ export async function apply (ctx, config) {
   const fiberAtApply = fiberState('apply')
   if (fiberAtApply) log('bridge fiber at apply: ' + fiberAtApply)
 
-  /**
-   * The scope bundles are mounted into: the session root, not this plugin's own.
-   *
-   * Measured on a live session with DSH_PI_BRIDGE_DEBUG=1: at apply() the bridge
-   * fiber was uid=78 state=1, and by the time an HTTP request arrived the same
-   * fiber was uid=null state=4 - DISPOSED (the host disposes a plugin instance's
-   * fiber on hot-reload, while the serve endpoint this bridge opened keeps calling
-   * through the old closure's ctx). cordis' plugin() starts with
-   * ctx.fiber.assertActive(), so every mount after that threw INACTIVE_EFFECT -
-   * for every bundle, including this bridge's own fixture. The tool path kept
-   * working because the host invokes tools on an active fiber, which is exactly
-   * the asymmetry that made the profile explanation look plausible for so long.
-   *
-   * The root context's fiber is created uid=0 ACTIVE (cordis lib/index.js:382-384)
-   * and is where the host mounts plugins itself; a real-cordis experiment shows
-   * inject + effect + register all succeed there after the bridge fiber dies. An
-   * effect opened there belongs to the session, which is the honest lifetime for a
-   * runtime-installed bundle anyway.
-   */
-  const mountScope = (() => {
-    try {
-      const r = ctx && ctx.root
-      if (r && typeof r.inject === 'function') return r
-    } catch { /* a host without a root handle: fall through to the proxy */ }
-    return serveScope
-  })()
+
 
   /**
    * Register one DSH forwarding tool per capability pi just loaded. Parameters
@@ -587,7 +578,7 @@ export async function apply (ctx, config) {
       list: () => [...hostCallable.keys()],
       load: async (source) => {
         if (!source) throw new Error('no source given')
-        let scopeProbe = [fiberAtApply, fiberState('mount-scope', mountScope), fiberState('bridge-ctx', ctx)].filter(Boolean).join(' | ')
+        let scopeProbe = [fiberAtApply, fiberState('detached', detachedScope), fiberState('bridge-ctx', ctx)].filter(Boolean).join(' | ')
         // Does ctx.inject on the root scope actually run its callback? The mount
         // now passes assertActive (root fiber is uid=0 ACTIVE) but the loader
         // reported 'registrations would go nowhere', which is this bridge's wording
@@ -598,8 +589,8 @@ export async function apply (ctx, config) {
         if (process.env.DSH_PI_BRIDGE_DEBUG === '1') {
           const probe = { ran: false, handle: 'none', awaited: 'not-awaited', direct: 'n/a' }
           try {
-            probe.direct = typeof mountScope.tools
-            const h = mountScope.inject(['tools'], () => { probe.ran = true })
+            probe.direct = typeof detachedScope.tools
+            const h = detachedScope.inject(['tools'], () => { probe.ran = true })
             probe.handle = h === undefined ? 'undefined' : typeof h
             if (h && typeof h.then === 'function') {
               probe.awaited = await Promise.race([
@@ -621,7 +612,15 @@ export async function apply (ctx, config) {
         // debug stack the loader had been asked to capture - so a session run with
         // DSH_PI_BRIDGE_DEBUG=1 still reported '(none)' and the refusal stayed
         // unexplained. Pass the result through instead of curating it here.
-        if (r.error) return { ...r, tools: [], commands: [], skills: 0, scopeProbe }
+        if (r.error) {
+          // A bundle that failed inside its own apply() may still have registered
+          // tools before it threw. Emptying the list here would hide a real
+          // half-load and make the report read like "this package has nothing";
+          // a refusal to mount at all has nothing registered, so the distinction
+          // the loader draws (bundleError) is exactly the one worth keeping.
+          if (r.bundleError) return { ...r, scopeProbe }
+          return { ...r, tools: [], commands: [], skills: 0, scopeProbe }
+        }
         // Tools the session already had are still exposed: they were registered by
         // the user's own dsh_install, and their definitions are in hostCallable.
         for (const n of r.reused || []) {

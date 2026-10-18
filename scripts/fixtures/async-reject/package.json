@@ -1,0 +1,11 @@
+{
+  "name": "async-reject",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./index.js",
+  "keywords": [
+    "dsh",
+    "dsh-plugin"
+  ],
+  "description": "Fixture whose apply rejects after registering one tool."
+}

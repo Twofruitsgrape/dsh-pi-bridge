@@ -92,8 +92,38 @@ export function createDetachedScope (snapshot, opts) {
       // the bundle problem and the loader reports it with the bundle name.
       // Swallowing it here is how a broken load would read as a successful empty
       // one - the exact class of bug this bridge has been chasing all day.
-      callback(child)
+      // Returning the bundle promise instead of dropping it is what keeps a
+      // plugin from killing the host. A callback here is often an async apply();
+      // calling it and ignoring its result leaves any rejection unawaited, and an
+      // unhandled rejection terminates the process. Measured on a live session:
+      // @furongjun1999/dsh-memory rejected inside apply, the host printed "dsh:
+      // fatal load failure" with a stack ending on this very line, the DSH process
+      // died, and the six loads still queued in that batch each got ECONNREFUSED.
+      // The loader awaits whatever inject hands back, so a rejection becomes a
+      // reported load failure for that one bundle.
+      const out = callback(child)
+      if (out && typeof out.then === 'function') {
+        return out.then(
+          () => ({ dispose () {} }),
+          (e) => { throw e },
+        )
+      }
       return { dispose () {} }
+    },
+    /**
+     * Which of these names the snapshot cannot supply.
+     *
+     * Cordis leaves an inject callback unexecuted when any named service is
+     * absent, and this scope mirrors that - but the loader then reported EVERY
+     * declared service as missing, which is wrong in a way that sends the user
+     * to fix the wrong thing. @dfy-plugins/dsh-visualize asks for tools, fs,
+     * skills and sessionPersistence; the session composes tools and skills, so
+     * only fs and sessionPersistence were actually absent. Naming the exact
+     * ones turns a vague refusal into an actionable one.
+     */
+    missing (names) {
+      const list = Array.isArray(names) ? names : [names]
+      return list.filter((n) => services[n] === undefined)
     },
     provide (name, value) { services[name] = value; return value },
   }
@@ -106,7 +136,10 @@ export function createDetachedScope (snapshot, opts) {
       if (typeof prop === "symbol") return undefined
       return undefined
     },
-    set () { return true },
+    // Assignments land on the target. Returning true without writing looked
+    // harmless and was not: scope.dispose = fn was accepted, discarded, and a
+    // caller asking for scope.dispose() got "not a function".
+    set (target, prop, value) { target[prop] = value; return true },
   })
 
   scope.dispose = () => {

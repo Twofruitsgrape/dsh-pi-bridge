@@ -57,7 +57,14 @@ function toUrl (file) {
  */
 export function rewriteHostSpecifiers (source, resolveSpec = hostEntry) {
   const mapped = []
-  const code = source.replace(/(\bfrom\s+|\bimport\s*\(\s*)(['"])([^'"\n]+)\2/g, (whole, head, quote, spec) => {
+  // Three shapes carry a specifier: from 'x', import('x'), and a bare side-effect
+  // import 'x' with no from at all. The third was missing, so a bundle whose
+  // hooks.js opened with import '@deepseek-ai/dsh-session'; kept the bare name and
+  // node could not resolve it from a cache copy - reported as the package wanting
+  // a package the product does not ship, when the product ships it and I had just
+  // failed to rewrite the one line that asked for it. (@furongjun1999/dsh-memory,
+  // measured: the specifier resolves fine from the build's own node_modules.)
+  const code = source.replace(/(\bfrom\s+|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"\n]+)\2/g, (whole, head, quote, spec) => {
     if (spec.startsWith('.') || spec.startsWith('node:') || spec.startsWith('file:') || !isHostSpecifier(spec)) return whole
     const file = resolveSpec(spec)
     if (!file) return whole
@@ -123,7 +130,7 @@ export function rewriteBundleTree (dir, resolveSpec = hostEntry, opts) {
       let source = ''
       try { source = readFileSync(full, 'utf8') } catch { continue }
       files++
-      if (!/from\s+['"]|import\s*\(/.test(source)) continue
+      if (!/from\s+['"]|import\s*\(|^\s*import\s+['"]/m.test(source)) continue
       const { code, mapped: hits } = rewriteHostSpecifiers(source, resolveSpec)
       if (!hits.length) continue
       for (const h of hits) mapped.add(h.specifier)
@@ -215,11 +222,16 @@ export async function loadDshBundle (dir, ctx, opts) {
       let lastError = null
       // The frames behind a refused load, kept only under DSH_PI_BRIDGE_DEBUG=1.
       let debugStack = null
+      // Why the attempt stopped matters, and reading every stop the same way
+      // produced two wrong reports at once: a bundle that threw inside its own
+      // apply() was blamed on a missing service, AND the loop then retried it with
+      // a narrower list, so the bundle registered its tools twice (measured:
+      // 'at_first' appeared twice in the host registry). The callback running at all
+      // is the signal - it means the scope DID compose what was asked, so anything
+      // that goes wrong afterwards is the bundle's own failure and must be reported
+      // as such, not retried. Only a callback that never ran is a refusal.
+      let bundleFailure = null
       for (const names of attempts) {
-        // Whether the callback ran is the evidence, not the return value: the host
-        // hands back a dispose object, a stand-in scope hands back whatever apply()
-        // returned (usually undefined), and reading that as failure would reject a
-        // load that had in fact registered everything.
         let ran = false
         try {
           await ctx.inject(names, (inner) => {
@@ -227,11 +239,26 @@ export async function loadDshBundle (dir, ctx, opts) {
             return apply(observeScope(inner, tools, commands, skillCount, registered, alreadyPresent, conflicts, flags), bundleConfig)
           })
         } catch (e) {
+          if (ran) { bundleFailure = e; break }
           lastError = e
           continue
         }
         composed = ran
         if (ran) break
+      }
+      if (bundleFailure) {
+        // Registered before it threw still counts: a bundle that half-loaded is
+        // reported with what it gave and the error that stopped it, rather than as
+        // a clean refusal that hides a real bug in the package.
+        for (const t of tools) callable.set(t.name, t.def)
+        return {
+          name: info.name, tools, commands, skills: skillCount.count, mapped: [], deferred: flags.deferred,
+          callable,
+          bundleError: true,
+          debugStack: process.env.DSH_PI_BRIDGE_DEBUG === '1' && bundleFailure.stack
+            ? String(bundleFailure.stack).split('\n').slice(1, 7).map((s) => s.trim()).join(' <- ') : null,
+          error: 'its own apply() failed: ' + String((bundleFailure && bundleFailure.message) || bundleFailure).slice(0, 200),
+        }
       }
       if (!composed) {
         const msg = String((lastError && (lastError.message || lastError)) || '')
@@ -264,12 +291,21 @@ export async function loadDshBundle (dir, ctx, opts) {
               ? 'needs configuration the host binds from its Config schema and patch row (apply() reads config.<field>.get()), which a runtime load cannot fabricate - mount it as a profile bundle instead: ' + msg.slice(0, 120)
               : alreadyRegistered
                 ? 'already loaded in this session (' + msg.slice(0, 110) + ')'
-                : 'needs services this profile does not compose (' + declared.join(', ') + '): ' + msg.slice(0, 140),
+                : 'needs ' + (typeof ctx.missing === 'function' ? ctx.missing(declared).join(', ') : declared.join(', ')) + ' composed here: ' + msg.slice(0, 140),
           }
         }
+        // No exception, but the callback never ran: the scope declined to compose
+        // something. Report the names it actually cannot supply rather than every
+        // name the bundle declared - a scope offering tools and skills but not fs
+        // should send the user to fs, not to the two services that were fine. A
+        // scope without a missing() to ask about still gets the declared list.
+        const absent = typeof ctx.missing === 'function' ? ctx.missing(declared) : []
+        const named = absent.length ? absent.join(', ') : (declared.join(', ') || 'the services it declares')
         return {
           name: info.name, tools: [], commands: [], skills: 0, mapped: [], deferred: flags.deferred,
-          error: 'this profile does not compose the services the bundle asks for (' + declared.join(', ') + '), so its registrations would go nowhere',
+          missing: absent,
+          error: 'this session does not compose ' + named + ', so its registrations would go nowhere'
+            + ' (asked for: ' + (declared.join(', ') || 'nothing in particular') + ')',
         }
       }
     } else {
