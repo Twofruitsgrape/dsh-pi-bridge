@@ -78,13 +78,21 @@ for (const spec of specs) {
   const text = String(out.content[0].text)
   const toolsLine = (text.match(/tools: ([^\n]*)/) || [])[1] || ''
   const names = toolsLine.trim() && toolsLine.trim() !== 'none' ? toolsLine.split(',').map((s) => s.trim()) : []
-  // Three outcomes and they are not equal. Forwarding is the goal; a refusal that
-  // names a real reason (a service this profile does not compose, configuration the
-  // host binds, no plugin module to apply) is a correct answer about the package,
-  // not a bridge failure. Only the silent fallback to translation, which would
-  // hand pi stubbed look-alikes while claiming success, counts as wrong here.
+  /**
+   * Three outcomes and they are not equal. Forwarding is the goal; a refusal that
+   * names a real reason (a service this session does not compose, configuration the
+   * host binds, no plugin module to apply) is a correct answer about the package,
+   * not a bridge failure. Only the silent fallback to translation, which would hand
+   * pi stubbed look-alikes while claiming success, counts as wrong here.
+   *
+   * 'its own apply() failed' joined the honest list when the loader started telling
+   * a bundle's failure apart from a scope refusal. Before that distinction existed,
+   * a bundle throwing inside apply was reported as needing a service and this
+   * harness called it a refusal; now it is reported as the package's own bug, which
+   * is still a truthful verdict about the package rather than a bridge defect.
+   */
   const forwarded = /via live DSH/.test(text)
-  const refused = /dsh_install failed/.test(text) && /(does not compose|configuration the host binds|no DSH apply\(\)|not in bridge cache|cannot install)/.test(text)
+  const refused = /dsh_install failed/.test(text) && /(does not compose|configuration the host binds|no DSH apply\(\)|no DSH entry|its own apply\(\) failed|not in bridge cache|cannot install)/.test(text)
   if (forwarded) check(path.basename(spec) + ': forwarded from the live DSH', true)
   else if (refused) { await log('  REFUSED (reported honestly): ' + text.replace(/\s+/g, ' ').slice(20, 170)); check(path.basename(spec) + ': refusal is explained', true) }
   else check(path.basename(spec) + ': forwarded from the live DSH', false, text.slice(0, 170))
@@ -109,7 +117,15 @@ for (const t of forwarded) {
 }
 await log('  forwarded tools in pi: ' + forwarded.length + ', valid schemas: ' + converted + ', bad: ' + bad)
 check('every forwarded tool has a schema pi accepts', bad === 0, 'bad=' + bad)
-check('real tools reached pi', converted > 10, 'converted=' + converted)
+// Existence, not volume. The old fixed threshold of ten was tuned to one
+// particular batch (mnemon + agent-teams, 31 tools). A different set of
+// published packages legitimately brings one tool: a headless session composes
+// no webServer, so most GUI bundles have nothing callable and the bridge says
+// so. Asserting a count made the verdict depend on which packages were listed
+// rather than on whether forwarding works. What must hold: every tool the
+// session had arrived with a schema pi accepts, and at least one arrived.
+check('real tools reached pi', converted > 0 && converted === forwarded.length,
+  'converted=' + converted + ' forwarded=' + forwarded.length)
 
 // Call one through the product path and confirm the answer came from DSH.
 await log('\n### calling a forwarded tool through pi')
