@@ -3,7 +3,7 @@
 import { isHostSpecifier, rewriteHostSpecifiers, rewriteBundleTree, hostModulesRoots } from "../src/dsh-loader.js"
 import { fileURLToPath } from "node:url"
 import path from "node:path"
-import { mkdirSync, writeFileSync, rmSync } from "node:fs"
+import { mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs"
 
 let fails = 0
 const check = (label, ok, detail) => {
@@ -97,6 +97,30 @@ check("a relative side-effect import is untouched", left.mapped.length === 0 && 
   rmSync(path.join(localDir, 'node_modules'), { recursive: true, force: true })
   const c = rewriteBundleTree(absentDir, () => null, { cacheRoot: path.dirname(FIX) })
   check("a specifier neither tree has stays a real absent module", c.mapped.length === 0, JSON.stringify(c))
+}
+
+// A plain node builtin ('path', 'fs/promises') must never reach a resolver at
+// all: hostEntry resolves a builtin to its own bare name and toUrl publishes it
+// as a fake "file://path" URL. Measured in the hot-100 DSH batch, chunk 1: two
+// bundled real plugins imported path/fs/promises bare and died with
+// "Cannot find module '\\path\\'" until the filter exempted builtins. The
+// recording resolver turns any consult into a visible leak.
+{
+  const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures')
+  const PRISTINE = "import path from 'path'\nimport { readFile } from 'fs/promises'\nimport os from 'os'\n"
+  const seen = []
+  const spy = (s) => (seen.push(s), 'file:///C:/host/leak.js')
+  const throughFilter = rewriteHostSpecifiers(PRISTINE, spy)
+  check("a builtin import never reaches the resolver (filter layer)",
+    seen.length === 0 && throughFilter.mapped.length === 0 && throughFilter.code === PRISTINE,
+    JSON.stringify({ seen, code: throughFilter.code }))
+  const dir = path.join(FIX, 'builtin-absent')
+  writeFileSync(path.join(dir, 'index.js'), PRISTINE)
+  rewriteBundleTree(dir, spy, { cacheRoot: path.dirname(FIX) })
+  const back = readFileSync(path.join(dir, 'index.js'), 'utf8')
+  check("a builtin import survives the bundle rewrite untouched (bundle layer)",
+    seen.length === 0 && back === PRISTINE, JSON.stringify({ seen, back }))
+  writeFileSync(path.join(dir, 'index.js'), PRISTINE)
 }
 
 // The detached scope is what the serve endpoint mounts bundles through once this

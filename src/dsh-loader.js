@@ -12,7 +12,7 @@
  *
  * @module src/dsh-loader.js
  */
-import { createRequire } from 'node:module'
+import { createRequire, isBuiltin } from 'node:module'
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -65,7 +65,13 @@ export function rewriteHostSpecifiers (source, resolveSpec = hostEntry) {
   // failed to rewrite the one line that asked for it. (@furongjun1999/dsh-memory,
   // measured: the specifier resolves fine from the build's own node_modules.)
   const code = source.replace(/(\bfrom\s+|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"\n]+)\2/g, (whole, head, quote, spec) => {
-    if (spec.startsWith('.') || spec.startsWith('node:') || spec.startsWith('file:')) return whole
+    // A plain builtin ('fs/promises', 'path') must also stay untouched: hostEntry
+    // resolves a builtin to its own bare name and toUrl would then publish a fake
+    // "file://path" import URL. Measured in the hot-100 DSH batch, chunk 1: two
+    // bundled real plugins (dsh-plugin-ops-core, npm:dsh-plan-and-execute) import
+    // path/fs/promises bare and died with "Cannot find module '\\path\\'" until
+    // this guard let node resolve builtins natively.
+    if (spec.startsWith('.') || spec.startsWith('node:') || spec.startsWith('file:') || isBuiltin(spec)) return whole
     const file = resolveSpec(spec)
     if (!file) return whole
     mapped.push({ specifier: spec, target: file })
@@ -132,6 +138,7 @@ export function rewriteBundleTree (dir, resolveSpec = hostEntry, opts) {
     return seg[0].startsWith('@') ? seg.slice(0, 2).join('/') : seg[0]
   }
   const withPeerFallback = (spec) => {
+    if (isBuiltin(spec)) return null // builtins resolve natively, never into toUrl
     if (isHostSpecifier(spec)) return resolveSpec(spec)
     if (existsSync(path.join(dir, 'node_modules', peerPackageName(spec)))) return null
     return resolveSpec(spec)
