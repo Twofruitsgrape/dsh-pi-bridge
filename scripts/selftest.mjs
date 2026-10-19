@@ -729,6 +729,33 @@ async function main () {
     check('no entry-count shortcut left', !/present >= deps.length/.test(src))
   }
 
+  console.log('peers beyond the manifest join the ship list')
+  {
+    // The main install skips every peer (--legacy-peer-deps), including the
+    // ones an installed dependency itself declares: @8kugames/dsh-zed-acp died
+    // on "Cannot find package 'zod'" although @agentclientprotocol/sdk - zod's
+    // declarer - sat in node_modules. peersToShip reads the tree's manifests.
+    const nm = path.join(HOME, 'fixtures', 'nested-peers', 'node_modules')
+    await mkdir(path.join(nm, 'sdk'), { recursive: true })
+    await mkdir(path.join(nm, 'kit'), { recursive: true })
+    await mkdir(path.join(nm, 'present'), { recursive: true })
+    await mkdir(path.join(nm, '@deepseek-ai', 'cordis'), { recursive: true })
+    await writeFile(path.join(nm, 'sdk', 'package.json'), JSON.stringify({ name: 'sdk', version: '1.2.3', peerDependencies: { zod: '^3.0.0', kit: '*' } }))
+    await writeFile(path.join(nm, 'kit', 'package.json'), JSON.stringify({ name: 'kit', version: '0.9.0', peerDependencies: { '@deepseek-ai/cordis': '^4.0.1' } }))
+    await writeFile(path.join(nm, 'present', 'package.json'), JSON.stringify({ name: 'present', version: '0.0.1', peerDependencies: { zod: '^3.0.0' } }))
+    const { peersToShip } = await import('../src/resolve.js')
+    const isHost = (n) => (String(n).startsWith('@deepseek-ai/') ? { name: n } : null)
+    let ship = await peersToShip(nm, [], isHost)
+    check('a nested peer of an installed package joins', ship.map(([n]) => n).join() === 'zod', JSON.stringify(ship))
+    check('an installed peer is not re-provisioned', !ship.some(([n]) => n === 'kit'), JSON.stringify(ship))
+    check('a host-resolved peer stays out', !ship.some(([n]) => String(n).startsWith('@deepseek-ai/')), JSON.stringify(ship))
+    // Provisioning is for absentees: once zod lands, nothing remains.
+    await mkdir(path.join(nm, 'zod'), { recursive: true })
+    await writeFile(path.join(nm, 'zod', 'package.json'), JSON.stringify({ name: 'zod', version: '3.23.8' }))
+    ship = await peersToShip(nm, [], isHost)
+    check('a complete tree ships nothing', ship.length === 0, JSON.stringify(ship))
+  }
+
   console.log('a split bundle resolves its own name')
   {
     // dsh-mnemon's providers each \`import "dsh-mnemon"\`. Installed by the plugin
@@ -867,6 +894,23 @@ async function main () {
     check('the peer gate covers every peer the build cannot resolve',
       /typeof r === 'string' && !hostEntry\(n\)/.test(src) && !/isHostSpecifier\(n\)/.test(src),
       'filter still keyed on a family specifier')
+    // npm 11.16 answers every named CLI add with "up to date" when the manifest
+    // carries devDependencies and the run passes --omit=dev (measured on the
+    // gap-feed copy and a two-line fixture: peers died missing although npm
+    // exited 0). The cache copy sheds the field before npm runs; losing the
+    // strip brings the silent failure back.
+    check('the cache copy sheds the devDependencies npm 11.16 exploits',
+      /delete pkg\.devDependencies/.test(src) && /npm 11\.16/.test(src))
+    // Peers one level past the manifest: @agentclientprotocol/sdk (installed,
+    // hoisted top-level) peers on zod, and the main install skips peer
+    // auto-install entirely - only the scan can name it.
+    check('the peers pass provisions peers of the installed tree too',
+      /await peersToShip\(nm, peerEntries, hostEntry\)/.test(src) && /export async function peersToShip/.test(src))
+    // Plain arborist resolution refuses legitimate peers when the dsh rc
+    // channels conflict (custom-provider's pi-ai); one legacy retry fixes that
+    // without handing every install to the flag.
+    check('a failed peers pass retries with --legacy-peer-deps',
+      /provisioning the peers with --legacy-peer-deps/.test(src) && /'--legacy-peer-deps', \.\.\.specs\]/.test(src))
   }
 
   console.log('a declared entry that is missing is reported')

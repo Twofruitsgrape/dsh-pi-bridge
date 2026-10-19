@@ -254,6 +254,19 @@ export async function installDependencies (dir, log) {
   const note = log || (() => {})
   let pkg = null
   try { pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) } catch { return { status: 'none' } }
+  // Measured: npm 11.16 reify discards what an install names whenever the
+  // manifest carries a devDependencies field and the run passes --omit=dev -
+  // every CLI add answers "up to date" with an empty node_modules (matrix on a
+  // gap-feed copy and a two-line fixture: devDependencies present + CLI add
+  // swallowed at 287-315ms, bare manifest + CLI add installed fine, and the
+  // identical commands without --omit=dev all installed). The field is build
+  // tooling (vite, vitest, typescript) the runtime never imports, so the cache
+  // copy sheds it before npm runs: --omit=dev keeps its meaning, no dev chain
+  // lands in a hot-list install, and the next pass finds nothing left to shed.
+  if (pkg.devDependencies && typeof pkg.devDependencies === 'object') {
+    delete pkg.devDependencies
+    await writeFile(path.join(dir, 'package.json'), JSON.stringify(pkg, null, 2) + '\n')
+  }
   const deps = Object.keys((pkg && pkg.dependencies) || {})
   // A host-family peer the running build does not ship dies as a bare
   // MODULE_NOT_FOUND at load although npm can still supply it, the way a native
@@ -284,7 +297,6 @@ export async function installDependencies (dir, log) {
     ? []
     : Object.entries((pkg && pkg.peerDependencies) || {})
         .filter(([n, r]) => typeof r === 'string' && !hostEntry(n))
-  const peerNames = peerEntries.map(([n]) => n)
   const peerSpecs = peerEntries.map(([n, r]) => (r === '*' ? n : n + '@' + r))
   if (!deps.length && !peerSpecs.length) { await ensureSelfReference(dir, note); return { status: 'none' } }
 
@@ -371,15 +383,45 @@ export async function installDependencies (dir, log) {
     return bits.length ? ' (' + bits.join('; ') + ')' : ''
   }
 
+  /**
+   * Provision every still-absent peer the build cannot resolve, then verify by
+   * name. The list comes from peersToShip (manifest plus the installed tree's
+   * own manifests), placeholders are purged before npm runs, and plain
+   * resolution is tried first: only a failure steps down to --legacy-peer-deps,
+   * which installs the named specs and their regular dependencies while
+   * skipping the auto-install of peers npm would have invented for them -
+   * measured on @linziyanleo/dsh-custom-provider, whose
+   * @earendil-works/pi-ai@^0.82.1 dies ERESOLVE plain on the dsh-brand
+   * 0.1.0-rc.7 / rc.8 channel conflict and installs fine (277 packages) under
+   * the legacy flag, with existence checked by name after every attempt.
+   *
+   * @param {Array<[string, string]>} entries [name, range] pairs
+   * @returns {Promise<{status:'partial', count:number, reason:string}|null>}
+   */
+  const shipPeers = async (entries) => {
+    const names = entries.map(([n]) => n)
+    const specs = entries.map(([n, r]) => (r === '*' ? n : n + '@' + r))
+    await purgePlaceholders(nm, names)
+    note('npm install the peers the running build does not ship (' + specs.join(', ') + ')')
+    const fit = await npmRun(['install', '--no-save', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', ...specs], INSTALL_BUDGET_MS)
+    let pleft = await missingDependencies(nm, names)
+    if (pleft.length) {
+      note('plain resolution fell short (npm ' + fit.code + '); provisioning the peers with --legacy-peer-deps')
+      const lit = await npmRun(['install', '--no-save', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps', ...specs], INSTALL_BUDGET_MS)
+      pleft = await missingDependencies(nm, names)
+      if (pleft.length) return { status: 'partial', count: deps.length, reason: 'npm exited ' + lit.code + ', peers missing ' + pleft.join(', ') + suffix(lit) }
+    }
+    return null
+  }
+  let ship = []
   if (warm) {
     // The warm-cache path has to write the forwarding package too: skipping it
     // made a bundle that imports itself load once and fail on every reload.
     await ensureSelfReference(dir, note)
-    if (!peerSpecs.length) return { status: 'installed', count: deps.length, reason: 'already present' }
-    note('npm install the peers the running build does not ship (' + peerSpecs.join(', ') + ')')
-    const fit = await npmRun(['install', '--no-save', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', ...peerSpecs], INSTALL_BUDGET_MS)
-    const pleft = await missingDependencies(nm, peerNames)
-    if (pleft.length) return { status: 'partial', count: deps.length, reason: 'npm exited ' + fit.code + ', peers missing ' + pleft.join(', ') + suffix(fit) }
+    if (hostBuildAround) ship = await peersToShip(nm, peerEntries, hostEntry)
+    if (!ship.length) return { status: 'installed', count: deps.length, reason: 'already present' }
+    const dead = await shipPeers(ship)
+    if (dead) return dead
     return { status: 'installed', count: deps.length, reason: (deps.length ? 'already present' : 'no dependencies declared') + ', plus peers the running build does not ship' }
   }
 
@@ -395,14 +437,15 @@ export async function installDependencies (dir, log) {
     stillMissing = await missingDependencies(nm, deps)
     if (stillMissing.length) note('retry (npm ' + retry.code + ') still missing: ' + stillMissing.join(', ') + suffix(retry))
   }
-  if (!stillMissing.length && peerSpecs.length) {
-    note('installing the peers the running build does not ship (' + peerSpecs.join(', ') + ')')
-    const fit = await npmRun(['install', '--no-save', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', ...peerSpecs], INSTALL_BUDGET_MS)
-    const pleft = await missingDependencies(nm, peerNames)
-    if (pleft.length) return { status: 'partial', count: deps.length, reason: 'npm exited ' + fit.code + ', peers missing ' + pleft.join(', ') + suffix(fit) }
+  if (!stillMissing.length && hostBuildAround) {
+    ship = await peersToShip(nm, peerEntries, hostEntry)
+    if (ship.length) {
+      const dead = await shipPeers(ship)
+      if (dead) return dead
+    }
   }
   await ensureSelfReference(dir, note)
-  if (!stillMissing.length) return { status: 'installed', count: deps.length, reason: 'all present by name' + (peerSpecs.length ? ' + peers the running build does not ship' : '') }
+  if (!stillMissing.length) return { status: 'installed', count: deps.length, reason: 'all present by name' + (ship.length ? ' + peers the running build does not ship' : '') }
   if (stillMissing.length < deps.length) {
     return { status: 'partial', count: deps.length, reason: 'npm exited ' + code + ', missing ' + stillMissing.join(', ') + suffix(install) }
   }
@@ -452,4 +495,54 @@ export async function purgePlaceholders (nm, deps) {
       }
     } catch { /* absent: nothing to purge */ }
   }
+}
+
+/**
+ * Every peer the tree still needs and the build cannot resolve.
+ *
+ * Manifest peers alone left a blind spot one level past them: the main install
+ * skips all peer auto-install (--legacy-peer-deps), so a dependency's own
+ * peerDependencies never land - measured on @8kugames/dsh-zed-acp, where
+ * @agentclientprotocol/sdk reached node_modules and its zod peer did not, and
+ * the load died with "Cannot find package 'zod'" although npm supplied
+ * everything the manifest itself named. The scan reads the one level npm
+ * resolves to (node_modules/<name>, node_modules/@scope/<name>), merges what
+ * the package's own manifest declared, passes every candidate through the
+ * same host gate the manifest peers use (under plain node no DSH root exists,
+ * and scanning there would fetch the host family for the bridge itself), and
+ * returns only the names still absent - placeholders from an earlier build
+ * are purged first so a stub cannot read as shipped.
+ *
+ * @param {string} nm node_modules directory
+ * @param {Array<[string, string]>} baseEntries peers from the package's own manifest
+ * @param {(name: string) => any} hostLookup the host's module resolver (hostEntry)
+ */
+export async function peersToShip (nm, baseEntries, hostLookup) {
+  const done = new Map(baseEntries)
+  let dirents = []
+  try { dirents = await readdir(nm, { withFileTypes: true }) } catch { dirents = [] }
+  const manifests = []
+  for (const d of dirents) {
+    if (!d.isDirectory()) continue
+    if (d.name.startsWith('@')) {
+      let sub = []
+      try { sub = await readdir(path.join(nm, d.name), { withFileTypes: true }) } catch { sub = [] }
+      for (const s of sub) if (s.isDirectory()) manifests.push(path.join(nm, d.name, s.name, 'package.json'))
+    } else {
+      manifests.push(path.join(nm, d.name, 'package.json'))
+    }
+  }
+  for (const file of manifests) {
+    try {
+      const raw = JSON.parse(await readFile(file, 'utf8'))
+      for (const [n, r] of Object.entries((raw && raw.peerDependencies) || {})) {
+        if (typeof r !== 'string' || done.has(n) || hostLookup(n)) continue
+        done.set(n, r)
+      }
+    } catch { /* an unreadable manifest names no peers we could act on */ }
+  }
+  const entries = [...done]
+  await purgePlaceholders(nm, entries.map(([n]) => n))
+  const absent = new Set(await missingDependencies(nm, entries.map(([n]) => n)))
+  return entries.filter(([n]) => absent.has(n))
 }
