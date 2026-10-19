@@ -260,7 +260,10 @@ export async function installDependencies (dir, log) {
   // a separate, honest failure: a peer whose pinned exports no longer match the
   // build (npm:dsh-plugin-uisfx) fails the load naming its export, and pinning
   // a second copy next to the build's own module is exactly the ambiguity this
-  // loader exists to avoid.
+  // loader exists to avoid. The pass keeps npm's own peer resolution alive
+  // (no --legacy-peer-deps): measured on the dsh-plugins-store cache copy, that
+  // flag made npm drop the ranged spec instead of installing it, while the same
+  // spec installed fine without the flag and pulled the peer's own peers in.
   const hostBuildAround = hostModulesRoots().some((r) => existsSync(r))
   const peerEntries = !hostBuildAround
     ? []
@@ -359,7 +362,7 @@ export async function installDependencies (dir, log) {
     await ensureSelfReference(dir, note)
     if (!peerSpecs.length) return { status: 'installed', count: deps.length, reason: 'already present' }
     note('npm install the peers the running build does not ship (' + peerSpecs.join(', ') + ')')
-    const fit = await npmRun(['install', '--no-save', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps', ...peerSpecs], INSTALL_BUDGET_MS)
+    const fit = await npmRun(['install', '--no-save', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', ...peerSpecs], INSTALL_BUDGET_MS)
     const pleft = await missingDependencies(nm, peerNames)
     if (pleft.length) return { status: 'partial', count: deps.length, reason: 'npm exited ' + fit.code + ', peers missing ' + pleft.join(', ') + suffix(fit) }
     return { status: 'installed', count: deps.length, reason: (deps.length ? 'already present' : 'no dependencies declared') + ', plus peers the running build does not ship' }
@@ -379,7 +382,7 @@ export async function installDependencies (dir, log) {
   }
   if (!stillMissing.length && peerSpecs.length) {
     note('installing the peers the running build does not ship (' + peerSpecs.join(', ') + ')')
-    const fit = await npmRun(['install', '--no-save', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps', ...peerSpecs], INSTALL_BUDGET_MS)
+    const fit = await npmRun(['install', '--no-save', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', ...peerSpecs], INSTALL_BUDGET_MS)
     const pleft = await missingDependencies(nm, peerNames)
     if (pleft.length) return { status: 'partial', count: deps.length, reason: 'npm exited ' + fit.code + ', peers missing ' + pleft.join(', ') + suffix(fit) }
   }
