@@ -1,8 +1,9 @@
 // Unit checks for the runtime DSH bundle loader: specifier classification and
 // host rewriting. They need no host, so they can gate the publish path.
-import { isHostSpecifier, rewriteHostSpecifiers, hostModulesRoots } from "../src/dsh-loader.js"
+import { isHostSpecifier, rewriteHostSpecifiers, rewriteBundleTree, hostModulesRoots } from "../src/dsh-loader.js"
 import { fileURLToPath } from "node:url"
 import path from "node:path"
+import { mkdirSync, writeFileSync, rmSync } from "node:fs"
 
 let fails = 0
 const check = (label, ok, detail) => {
@@ -64,6 +65,40 @@ check("a named import is rewritten exactly once",
   once.code.split("file:///C:/host").length - 1 === 1 && once.mapped.length === 1, once.code)
 const left = rewriteHostSpecifiers("import " + JSON.stringify("./local.js"), fakeSpec)
 check("a relative side-effect import is untouched", left.mapped.length === 0 && left.code.includes("./local.js"), left.code)
+
+// A peer dependency is a third-party specifier the bundle tree usually does not
+// carry: the cache install skips peers (--legacy-peer-deps; in a native install
+// they are the host's job). Measured live: npm:dsh-mcp-connector declares zod as
+// a peer, a cache copy died with "Cannot find package 'zod'", and the running
+// build ships a genuine zod - so a third-party import must resolve from the
+// bundle's own tree first, then the running build, and a true absence must stay
+// untouched so the load reports the real MODULE_NOT_FOUND instead of a stub.
+{
+  const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures')
+  const PRISTINE = "import { x } from '@deepseek-ai/dsh-tools'\nimport { z } from 'zod'\nexport const both = [x, z]\n"
+  const absentDir = path.join(FIX, 'peer-absent')
+  const localDir = path.join(FIX, 'peer-local')
+  const servesBoth = (s) => (s === '@deepseek-ai/dsh-tools' ? 'C:/host/tools.js' : s === 'zod' ? 'C:/host/zod-entry.js' : null)
+  // rewriteBundleTree rewrites files in place: every run starts from the pristine
+  // imports instead of measuring the previous run's file: URLs, and ends by
+  // restoring what it touched.
+  writeFileSync(path.join(absentDir, 'index.js'), PRISTINE)
+  writeFileSync(path.join(localDir, 'index.js'), PRISTINE)
+  mkdirSync(path.join(localDir, 'node_modules', 'zod'), { recursive: true })
+  writeFileSync(path.join(localDir, 'node_modules', 'zod', 'package.json'), JSON.stringify({ name: 'zod', version: '4.0.0', main: 'index.js' }))
+  writeFileSync(path.join(localDir, 'node_modules', 'zod', 'index.js'), 'export const z = { shape: true }\n')
+  const a = rewriteBundleTree(absentDir, servesBoth, { cacheRoot: path.dirname(FIX) })
+  check("an absent peer falls back to the running build", a.mapped.includes('zod') && a.mapped.includes('@deepseek-ai/dsh-tools'), JSON.stringify(a))
+  const b = rewriteBundleTree(localDir, servesBoth, { cacheRoot: path.dirname(FIX) })
+  check("a peer the bundle carries locally wins over the build", !b.mapped.includes('zod') && b.mapped.includes('@deepseek-ai/dsh-tools'), JSON.stringify(b))
+  // restore both fixtures so a committed tree stays clean after the run
+  writeFileSync(path.join(absentDir, 'index.js'), PRISTINE)
+  writeFileSync(path.join(localDir, 'index.js'), PRISTINE)
+  rmSync(path.join(localDir, 'node_modules'), { recursive: true, force: true })
+  const c = rewriteBundleTree(absentDir, () => null, { cacheRoot: path.dirname(FIX) })
+  check("a specifier neither tree has stays a real absent module", c.mapped.length === 0, JSON.stringify(c))
+}
+
 // The detached scope is what the serve endpoint mounts bundles through once this
 // plugin own fiber has been disposed (measured live: uid=78 at apply, uid=null at
 // request). Two properties matter and neither is visible from the outside:

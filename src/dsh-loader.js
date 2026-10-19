@@ -13,7 +13,7 @@
  * @module src/dsh-loader.js
  */
 import { createRequire } from 'node:module'
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
@@ -65,7 +65,7 @@ export function rewriteHostSpecifiers (source, resolveSpec = hostEntry) {
   // failed to rewrite the one line that asked for it. (@furongjun1999/dsh-memory,
   // measured: the specifier resolves fine from the build's own node_modules.)
   const code = source.replace(/(\bfrom\s+|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"\n]+)\2/g, (whole, head, quote, spec) => {
-    if (spec.startsWith('.') || spec.startsWith('node:') || spec.startsWith('file:') || !isHostSpecifier(spec)) return whole
+    if (spec.startsWith('.') || spec.startsWith('node:') || spec.startsWith('file:')) return whole
     const file = resolveSpec(spec)
     if (!file) return whole
     mapped.push({ specifier: spec, target: file })
@@ -115,6 +115,27 @@ export function rewriteBundleTree (dir, resolveSpec = hostEntry, opts) {
   }
   const mapped = new Set()
   let files = 0
+  /**
+   * A third-party specifier gets one fallback the host families never needed:
+   * the bundle's own tree first, then the running build. Measured live:
+   * dsh-mcp-connector declares zod as a peer dependency - the cache install
+   * deliberately skips peers (--legacy-peer-deps; in a native install they are
+   * the host's job), the specifier is third-party so the family prefixes did
+   * not rewrite it, and the load died with "Cannot find package 'zod'" although
+   * the running build ships a genuine zod in its own node_modules. This mirrors
+   * what a profile install would hand the bundle: its own copy when it has one,
+   * the build's when it does not, and a real MODULE_NOT_FOUND when neither
+   * exists - never a stub.
+   */
+  const peerPackageName = (spec) => {
+    const seg = spec.split('/')
+    return seg[0].startsWith('@') ? seg.slice(0, 2).join('/') : seg[0]
+  }
+  const withPeerFallback = (spec) => {
+    if (isHostSpecifier(spec)) return resolveSpec(spec)
+    if (existsSync(path.join(dir, 'node_modules', peerPackageName(spec)))) return null
+    return resolveSpec(spec)
+  }
   const walk = (current, depth) => {
     if (depth > 12 || files >= limit) return
     let entries = []
@@ -131,7 +152,7 @@ export function rewriteBundleTree (dir, resolveSpec = hostEntry, opts) {
       try { source = readFileSync(full, 'utf8') } catch { continue }
       files++
       if (!/from\s+['"]|import\s*\(|^\s*import\s+['"]/m.test(source)) continue
-      const { code, mapped: hits } = rewriteHostSpecifiers(source, resolveSpec)
+      const { code, mapped: hits } = rewriteHostSpecifiers(source, withPeerFallback)
       if (!hits.length) continue
       for (const h of hits) mapped.add(h.specifier)
       try { writeFileSync(full, code, 'utf8') } catch (err) { log('could not rewrite ' + e.name + ': ' + String(err && err.code)) }
