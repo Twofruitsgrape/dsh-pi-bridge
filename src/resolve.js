@@ -13,11 +13,13 @@
  * @module src/resolve.js
  */
 import { mkdir, rename, rm, cp, readFile, writeFile, readdir, lstat, realpath } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import os from 'node:os'
 import { extractTgz } from './tar.js'
 import { ensureSelfReference } from './self-ref.js'
+import { hostEntry, hostModulesRoots, isHostSpecifier } from './dsh-loader.js'
 
 export const CACHE_ROOT = process.env.DSH_PI_BRIDGE_HOME
   ? path.resolve(process.env.DSH_PI_BRIDGE_HOME)
@@ -245,9 +247,33 @@ export async function installDependencies (dir, log) {
   let pkg = null
   try { pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) } catch { return { status: 'none' } }
   const deps = Object.keys((pkg && pkg.dependencies) || {})
-  if (!deps.length) { await ensureSelfReference(dir, note); return { status: 'none' } }
+  // A host-family peer the running build does not ship dies as a bare
+  // MODULE_NOT_FOUND at load although npm can still supply it, the way a native
+  // profile install auto-provisions peers. Measured: npm:dsh-plugins-store peers
+  // on @deepseek-ai/dsh-native-command@^0.2.1-alpha.2, which the running build
+  // does not carry, and this install deliberately skips peers
+  // (--legacy-peer-deps) betting the build provides them - it did not. The pass
+  // below runs only where a host build is actually around to answer hostEntry:
+  // under plain node (offline tests, the pi daemon) no DSH root exists, and run
+  // unconditionally it would fetch @deepseek-ai/cordis for the bridge itself on
+  // every materialize although nothing under pi imports it. Version drift stays
+  // a separate, honest failure: a peer whose pinned exports no longer match the
+  // build (npm:dsh-plugin-uisfx) fails the load naming its export, and pinning
+  // a second copy next to the build's own module is exactly the ambiguity this
+  // loader exists to avoid.
+  const hostBuildAround = hostModulesRoots().some((r) => existsSync(r))
+  const peerEntries = !hostBuildAround
+    ? []
+    : Object.entries((pkg && pkg.peerDependencies) || {})
+        .filter(([n, r]) => typeof r === 'string' && isHostSpecifier(n) && !hostEntry(n))
+  const peerNames = peerEntries.map(([n]) => n)
+  const peerSpecs = peerEntries.map(([n, r]) => (r === '*' ? n : n + '@' + r))
+  if (!deps.length && !peerSpecs.length) { await ensureSelfReference(dir, note); return { status: 'none' } }
 
   const nm = path.join(dir, 'node_modules')
+  // An absent host-family peer is an install-time fact, so name it before npm
+  // runs instead of letting the load report a MODULE_NOT_FOUND with no cause.
+  if (peerSpecs.length) note('peers the running build does not ship: ' + peerSpecs.join(', '))
   await purgePlaceholders(nm, deps)
   // Counting top-level entries is not evidence that the dependencies are there.
   // A scoped name occupies a single directory, so two @scope/* dependencies read as
@@ -255,15 +281,15 @@ export async function installDependencies (dir, log) {
   // combination let a half-installed bundle look complete and skip the install,
   // which a live load then reported as a missing package. Ask for each name.
   const missing = await missingDependencies(nm, deps)
-  if (!missing.length) {
+  const warm = missing.length === 0
+  if (!warm) {
     // The warm-cache path has to write the forwarding package too: skipping it
     // made a bundle that imports itself load once and fail on every reload.
     await ensureSelfReference(dir, note)
-    return { status: 'installed', count: deps.length, reason: 'already present' }
   }
 
   const args = ['install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps']
-  note('npm install (' + deps.length + ' dependencies) in ' + path.basename(dir))
+  if (!warm) note('npm install (' + deps.length + ' dependencies) in ' + path.basename(dir))
   /**
    * Run the install, keeping the tail of npm's own output.
    *
@@ -305,8 +331,12 @@ export async function installDependencies (dir, log) {
     child.on('error', (e) => { clearTimeout(timer); done({ code: 'spawn:' + (e && e.code), tail, timedOut }) })
     child.on('close', (c) => { clearTimeout(timer); done({ code: c, tail, timedOut }) })
   })
-  const install = await npmRun(args, INSTALL_BUDGET_MS)
-  const code = install.code
+  let install = null
+  let code = null
+  if (!warm) {
+    install = await npmRun(args, INSTALL_BUDGET_MS)
+    code = install.code
+  }
   /**
    * What to append to a failure reason so it names a cause.
    *
@@ -323,6 +353,17 @@ export async function installDependencies (dir, log) {
     return bits.length ? ' (' + bits.join('; ') + ')' : ''
   }
 
+  if (warm) {
+    // The warm-cache path has to write the forwarding package too: skipping it
+    // made a bundle that imports itself load once and fail on every reload.
+    await ensureSelfReference(dir, note)
+    if (!peerSpecs.length) return { status: 'installed', count: deps.length, reason: 'already present' }
+    note('npm install the peers the running build does not ship (' + peerSpecs.join(', ') + ')')
+    const fit = await npmRun(['install', '--no-save', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps', ...peerSpecs], INSTALL_BUDGET_MS)
+    const pleft = await missingDependencies(nm, peerNames)
+    if (pleft.length) return { status: 'partial', count: deps.length, reason: 'npm exited ' + fit.code + ', peers missing ' + pleft.join(', ') + suffix(fit) }
+    return { status: 'installed', count: deps.length, reason: (deps.length ? 'already present' : 'no dependencies declared') + ', plus peers the running build does not ship' }
+  }
 
   let stillMissing = await missingDependencies(nm, deps)
   // A bridge cache copy can arrive with npm state from an earlier build (its
@@ -336,8 +377,14 @@ export async function installDependencies (dir, log) {
     stillMissing = await missingDependencies(nm, deps)
     if (stillMissing.length) note('retry (npm ' + retry.code + ') still missing: ' + stillMissing.join(', ') + suffix(retry))
   }
+  if (!stillMissing.length && peerSpecs.length) {
+    note('installing the peers the running build does not ship (' + peerSpecs.join(', ') + ')')
+    const fit = await npmRun(['install', '--no-save', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps', ...peerSpecs], INSTALL_BUDGET_MS)
+    const pleft = await missingDependencies(nm, peerNames)
+    if (pleft.length) return { status: 'partial', count: deps.length, reason: 'npm exited ' + fit.code + ', peers missing ' + pleft.join(', ') + suffix(fit) }
+  }
   await ensureSelfReference(dir, note)
-  if (!stillMissing.length) return { status: 'installed', count: deps.length, reason: 'all present by name' }
+  if (!stillMissing.length) return { status: 'installed', count: deps.length, reason: 'all present by name' + (peerSpecs.length ? ' + peers the running build does not ship' : '') }
   if (stillMissing.length < deps.length) {
     return { status: 'partial', count: deps.length, reason: 'npm exited ' + code + ', missing ' + stillMissing.join(', ') + suffix(install) }
   }
