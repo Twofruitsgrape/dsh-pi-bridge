@@ -150,7 +150,17 @@ export function rewriteBundleTree (dir, resolveSpec = hostEntry, opts) {
     for (const e of entries) {
       const full = path.join(current, e.name)
       if (e.isDirectory()) {
-        if (e.name === 'node_modules' || e.name.startsWith('.')) continue
+        // node_modules inside the copy must be walked too: a bundle's nested
+        // packages carry specifiers that only the rewrite can resolve. Measured
+        // in the hot-100 DSH batch: zed-acp's npm-installed
+        // @agentclientprotocol/sdk dist imports bare 'zod' (third-party; the
+        // build ships one), wwrs-voice's nested @deepseek-ai/dsh-* files import
+        // bare '@deepseek-ai/cordis' (family). Skipping the subtree left both
+        // specifiers bare and both bundles died with MODULE_NOT_FOUND although
+        // withPeerFallback had exactly what they asked for. Dot-directories
+        // stay skipped. Idempotent: already-rewritten specifiers are file:
+        // URLs, which rewriteHostSpecifiers leaves alone.
+        if (e.name.startsWith('.')) continue
         walk(full, depth + 1)
         continue
       }

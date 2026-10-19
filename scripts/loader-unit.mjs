@@ -99,6 +99,41 @@ check("a relative side-effect import is untouched", left.mapped.length === 0 && 
   check("a specifier neither tree has stays a real absent module", c.mapped.length === 0, JSON.stringify(c))
 }
 
+// The npm-installed node_modules subtree inside the cache copy must be walked:
+// nested packages carry the very specifiers the fallback exists for. Measured
+// live: @8kugames/dsh-zed-acp's sdk dist imports bare 'zod' (the build ships
+// zod, so the resolve layer never provisioned it), and dsh-plugin-wwrs-voice's
+// nested @deepseek-ai/dsh-* files import bare 'cordis' (family). When the walk
+// skipped node_modules both stayed bare and both loads died with
+// MODULE_NOT_FOUND.
+{
+  const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures')
+  const NESTED = [
+    "import { x } from '@deepseek-ai/dsh-tools'",
+    "import { z } from 'zod'",
+    "export const both = [x, z]",
+  ].join(String.fromCharCode(10))
+  const dir = path.join(FIX, 'peer-nested')
+  const nested = path.join(dir, 'node_modules', '@vendor', 'nested')
+  const servesBoth = (s) => (s === '@deepseek-ai/dsh-tools' ? 'C:/host/tools.js' : s === 'zod' ? 'C:/host/zod-entry.js' : null)
+  mkdirSync(nested, { recursive: true })
+  writeFileSync(path.join(nested, 'package.json'), JSON.stringify({ name: '@vendor/nested', version: '1.0.0', main: 'dist.js' }))
+  writeFileSync(path.join(nested, 'dist.js'), NESTED)
+  const n = rewriteBundleTree(dir, servesBoth, { cacheRoot: path.dirname(FIX) })
+  const back = readFileSync(path.join(nested, 'dist.js'), 'utf8')
+  check("a nested node_modules file gets the family rewrite",
+    back.includes('file:///C:/host/tools.js'), JSON.stringify({ mapped: n.mapped, back: back.slice(0, 110) }))
+  check("a nested node_modules file gets the third-party fallback",
+    n.mapped.includes('zod') && back.includes('file:///C:/host/zod-entry.js'), JSON.stringify(n.mapped))
+  // Re-running over the already-rewritten tree changes nothing: file: URLs are
+  // left alone, so reinstalling or reloading a live cache copy cannot corrupt it.
+  const again = rewriteBundleTree(dir, servesBoth, { cacheRoot: path.dirname(FIX) })
+  const twice = readFileSync(path.join(nested, 'dist.js'), 'utf8')
+  check("re-running over rewritten urls leaves them alone",
+    again.mapped.length === 0 && twice === back, JSON.stringify({ mapped: again.mapped, changed: twice !== back }))
+  rmSync(path.join(dir, 'node_modules'), { recursive: true, force: true })
+}
+
 // A plain node builtin ('path', 'fs/promises') must never reach a resolver at
 // all: hostEntry resolves a builtin to its own bare name and toUrl publishes it
 // as a fake "file://path" URL. Measured in the hot-100 DSH batch, chunk 1: two
