@@ -19,7 +19,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { extractTgz } from './tar.js'
 import { ensureSelfReference } from './self-ref.js'
-import { hostEntry, hostModulesRoots, isHostSpecifier } from './dsh-loader.js'
+import { hostEntry, hostModulesRoots } from './dsh-loader.js'
 
 export const CACHE_ROOT = process.env.DSH_PI_BRIDGE_HOME
   ? path.resolve(process.env.DSH_PI_BRIDGE_HOME)
@@ -272,17 +272,24 @@ export async function installDependencies (dir, log) {
   // (no --legacy-peer-deps): measured on the dsh-plugins-store cache copy, that
   // flag made npm drop the ranged spec instead of installing it, while the same
   // spec installed fine without the flag and pulled the peer's own peers in.
+  // The family gate is gone from the filter itself: hot-list packages died the
+  // same way on peers outside the family (npm:dsh-custom-provider's
+  // @earendil-works/pi-ai, npm:dsh-gap-feed's react), and every peer the build
+  // cannot resolve is one a native profile install would provision through
+  // npm's own resolution. The loader still answers a host the build carries
+  // first, so a package-local copy is reached only where the draw would
+  // otherwise die.
   const hostBuildAround = hostModulesRoots().some((r) => existsSync(r))
   const peerEntries = !hostBuildAround
     ? []
     : Object.entries((pkg && pkg.peerDependencies) || {})
-        .filter(([n, r]) => typeof r === 'string' && isHostSpecifier(n) && !hostEntry(n))
+        .filter(([n, r]) => typeof r === 'string' && !hostEntry(n))
   const peerNames = peerEntries.map(([n]) => n)
   const peerSpecs = peerEntries.map(([n, r]) => (r === '*' ? n : n + '@' + r))
   if (!deps.length && !peerSpecs.length) { await ensureSelfReference(dir, note); return { status: 'none' } }
 
   const nm = path.join(dir, 'node_modules')
-  // An absent host-family peer is an install-time fact, so name it before npm
+  // An absent peer is an install-time fact, so name it before npm
   // runs instead of letting the load report a MODULE_NOT_FOUND with no cause.
   if (peerSpecs.length) note('peers the running build does not ship: ' + peerSpecs.join(', '))
   await purgePlaceholders(nm, deps)

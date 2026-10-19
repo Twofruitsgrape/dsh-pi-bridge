@@ -860,6 +860,13 @@ async function main () {
     check('the budget is adjustable without a rebuild', /DSH_PI_BRIDGE_INSTALL_MS/.test(src))
     check('no reason is built from the exit code alone',
       !/reason: 'npm exited ' \+ code \}/.test(src) && !/reason: 'npm exited ' \+ code,$/.test(src))
+    // The peer gate must stay keyed on 'the build cannot resolve this peer': a
+    // family filter left it blind to everything else the manifest declares -
+    // dsh-custom-provider's @earendil-works/pi-ai and dsh-gap-feed's react both
+    // died MODULE_NOT_FOUND although npm resolves both.
+    check('the peer gate covers every peer the build cannot resolve',
+      /typeof r === 'string' && !hostEntry\(n\)/.test(src) && !/isHostSpecifier\(n\)/.test(src),
+      'filter still keyed on a family specifier')
   }
 
   console.log('a declared entry that is missing is reported')
