@@ -1,3 +1,5 @@
+**English** · [简体中文](docs/readme/README_zh.md)
+
 # dsh-pi-bridge
 
 One plugin, two hosts. Install it in pi and it lets pi use DeepSeek Harness
