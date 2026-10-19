@@ -108,8 +108,16 @@ async function hasManifest (dir) {
 }
 
 async function fromNpm (id, dest, log) {
-  const versioned = /@[^/]+$/.test(id) || /@\d/.test(id) ? id : id + '@latest'
-  const name = versioned.replace(/@[^@]*$/, '')
+  // A scope is easy to read as a version: '@8kugames' contains an '@' followed by
+  // a digit, and the whole '@8kugames/dsh-zed-acp' matches a strip-the-tail
+  // pattern - both hot-list packages (@8kugames/dsh-zed-acp, @1e0zj/dsh-plugin-mall,
+  // @1agents/feature-blueprint) then fetched the registry root and died as
+  // 'no tarball' although npm has one. npm names split on the LAST '@' of the id:
+  // everything before it is the name, and an '@' at index 0, which a scope is,
+  // means an unversioned spec.
+  const at = id.lastIndexOf('@')
+  const versioned = at > 0 ? id : id + '@latest'
+  const name = at > 0 ? id.slice(0, at) : id
   log('npm: ' + versioned)
   const encoded = name.startsWith('@') ? name.replace('/', '%2F') : name
   const meta = JSON.parse(await fetchText(registry() + '/' + encoded))

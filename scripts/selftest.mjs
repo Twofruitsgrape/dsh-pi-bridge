@@ -320,6 +320,50 @@ async function main () {
     check('local source resolves through the same path as npm', !!local.info.name && local.errors.length === 0, JSON.stringify(local.errors).slice(0, 200))
   }
 
+  console.log('npm specs whose scope starts with a digit resolve')
+  {
+    // '@8kugames/dsh-zed-acp' used to be read as name '' + version
+    // '8kugames/dsh-zed-acp': the /@\d/ check took '@8kugames' for a version and
+    // the tail-strip regex then ate the whole scoped name, so the fetch landed on
+    // the registry root and the install died as 'no tarball' although npm has one.
+    const { resolve } = await import('../src/resolve.js')
+    const { createServer } = await import('node:http')
+    const tgzBytes = await readFile(path.join(HERE, 'fixtures', 'digit-scope', 'pkg.tgz'))
+    const meta = {
+      name: '@8kugames/dsh-zed-acp',
+      'dist-tags': { latest: '0.3.5' },
+      versions: {
+        '0.3.5': { name: '@8kugames/dsh-zed-acp', version: '0.3.5', dist: { tarball: '/zed.tgz' } },
+      },
+    }
+    const server = createServer((req, res) => {
+      if (req.url === '/@8kugames%2Fdsh-zed-acp') {
+        res.setHeader('content-type', 'application/json')
+        res.end(JSON.stringify(meta))
+      } else if (req.url === '/zed.tgz') {
+        res.setHeader('content-type', 'application/x-tgz')
+        res.end(tgzBytes)
+      } else {
+        res.statusCode = 404
+        res.end('')
+      }
+    })
+    await new Promise((done) => server.listen(0, '127.0.0.1', done))
+    const base = 'http://127.0.0.1:' + server.address().port
+    meta.versions['0.3.5'].dist.tarball = base + '/zed.tgz'
+    const prev = process.env.DSH_PI_BRIDGE_REGISTRY
+    process.env.DSH_PI_BRIDGE_REGISTRY = base
+    try {
+      const out = await resolve('npm:@8kugames/dsh-zed-acp', { refresh: true, log: () => {} })
+      const manifest = JSON.parse(await readFile(path.join(out.dir, 'package.json'), 'utf8'))
+      check('digit-scope npm package materializes from its latest tarball', manifest.version === '0.3.5', JSON.stringify(manifest))
+    } finally {
+      if (prev === undefined) delete process.env.DSH_PI_BRIDGE_REGISTRY
+      else process.env.DSH_PI_BRIDGE_REGISTRY = prev
+      server.close()
+    }
+  }
+
   console.log('no placeholder dependencies survive')
   {
     // Placeholders (0.0.0-bridge-missing) used to occupy a real dependency's
