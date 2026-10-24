@@ -109,6 +109,7 @@ export function createDetachedScope (snapshot, opts) {
       // missing belong here for the same reason - an inner callback can
       // register a service and ask what is absent just like a top-level one.
       child.provide = base.provide
+      child.get = base.get
       child.plugin = base.plugin
       child.missing = base.missing
       child.reflect = base.reflect
@@ -151,6 +152,18 @@ export function createDetachedScope (snapshot, opts) {
       return list.filter((n) => services[n] === undefined)
     },
     provide (name, value) { services[name] = value; return value },
+    /**
+     * Cordis's own ctx.get(name): read a service without an inject requirement.
+     *
+     * A bundle's execute() block reaches for optional services this way rather
+     * than through inject - npm:dingpenghui/agnes-image resolves 'credentials'
+     * and 'attachments' with ctx.get, and without it every generate_image call
+     * died with 'ctx.get is not a function'. The snapshot holds the real service
+     * objects owned by live host fibers, so returning them is the same answer the
+     * host context gives; a name never captured stays undefined and the bundle
+     * reports that in its own words.
+     */
+    get (name) { return services[name] },
     /**
      * The reflect view real cordis contexts expose. A bundle that subclasses
      * the HOST's own Service class constructs its service through

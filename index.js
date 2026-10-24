@@ -22,7 +22,7 @@ import { readFile, writeFile, mkdir, rm } from 'node:fs/promises'
 import { installThroughProxy, loadIntoPi, callTool, listTools, materialize, ensureDaemon } from './src/proxy.js'
 import { skillProviderFor } from './src/replay-dsh.js'
 import { restoreIntoDsh } from './src/restore.js'
-import { toToolSpec } from './src/schema.js'
+import { toToolSchema } from './src/schema.js'
 import { loadDshBundle } from './src/dsh-loader.js'
 import { startDshServer } from './src/serve.js'
 import { projectResult } from './src/capabilities.js'
@@ -69,16 +69,34 @@ function guarded (fn) {
  * A bundle installed through the plugin manager is a symlink under the profile's
  * node_modules, so a bare specifier like '@deepseek-ai/dsh-tools' has no resolve
  * path from inside it and the import always fails; silently falling back then
- * handed the host an uncompiled schema. The host tools service takes a property
- * spec map and compiles it itself, so the bridge only has to hand it that shape.
+ * handed the host an uncompiled schema. Compatibility with the host convention
+ * was measured, not assumed: `defineTool` compiles `parameters` to a JSON
+ * Schema before registration (dsh-tools/lib/index.js:845, and gitbash-shell's
+ * fallback path does the same), while a plain def passes through to the model
+ * request untouched - a raw spec map there is rejected by the model API as
+ * `got 'type: null'`. So the bridge hands the host the compiled schema itself,
+ * the same shape the official ecosystem produces.
+ *
  */
 function defineHostTool (options) {
   return {
     ...options,
-    parameters: toToolSpec(options.parameters),
+    parameters: toToolSchema(options.parameters),
     execute: options.execute,
   }
 }
+
+/**
+ * A tool with no arguments still must not declare nothing.
+ *
+ * Measured on a real DSH boot: an empty property-spec map reaches the provider
+ * adapter uncompilable (the DeepSeek account endpoint rejected the whole turn
+ * with `Invalid schema for function 'bridge_list': ... got 'type: null'`), so
+ * the session could not answer at all. A real boolean parameter keeps the
+ * compiled schema non-empty and is honest about it: verbose returns the full
+ * raw state instead of the short summary.
+ */
+const VERBOSE_ARG = { type: 'boolean', description: 'Return the full raw state JSON instead of the short summary.' }
 
 async function readRegistry () {
   try { return JSON.parse(await readFile(REGISTRY_FILE, 'utf8')) } catch { return { bridges: {} } }
@@ -345,7 +363,7 @@ export async function apply (ctx, config) {
           name,
           description: (t.description || '(no description)')
             + ' [dsh-pi-bridge: runs natively inside pi, from ' + (t.origin || 'pi') + ']',
-          parameters: toToolSpec(t.parameters),
+          parameters: toToolSchema(t.parameters),
           output: OUT(),
           execute: async (args) => {
             const res = await callTool(t.name, args || {})
@@ -492,9 +510,10 @@ export async function apply (ctx, config) {
   ctx.tools.register(tool({
     name: 'bridge_list',
     description: 'List plugin bundles this bridge installed into DSH, with the tools and skills each contributed and whether they run through the pi host process.',
-    parameters: {},
+    parameters: { verbose: VERBOSE_ARG },
     output: OUT(),
-    execute: guarded(async () => {
+    execute: guarded(async (args) => {
+      if (args && args.verbose) return JSON.stringify({ bridges: state.bridges }, null, 2)
       const keys = Object.keys(state.bridges)
       if (!keys.length) return 'no bridged packages yet'
       return keys.map((k) => {
@@ -524,11 +543,12 @@ export async function apply (ctx, config) {
   ctx.tools.register(tool({
     name: 'bridge_status',
     description: 'Report the pi host-process daemon behind the bridge: whether it is up, whether it captured an extension context, and which tools it holds. Check this before debugging a failed pi_install.',
-    parameters: {},
+    parameters: { verbose: VERBOSE_ARG },
     output: OUT(),
-    execute: guarded(async () => {
+    execute: guarded(async (args) => {
       const h = await ensureDaemon({ log })
       const t = await listTools().catch(() => ({ tools: [] }))
+      if (args && args.verbose) return JSON.stringify({ daemonRaw: h, piTools: t.tools, bridges: state.bridges }, null, 2)
       return JSON.stringify({
         daemon: { ok: !!(h && h.ok), ctxCaptured: !!(h && h.ctx), toolsInPi: h && h.tools },
         bridgeOwned: (t.tools || []).filter((x) => x.origin === 'bridge').map((x) => x.name),
@@ -684,6 +704,12 @@ export async function apply (ctx, config) {
             arguments: args || {},
             signal: controller.signal,
             agent: undefined,
+            // Host services are the deployment's, not the agent's: resolve them
+            // from the scope this plugin runs in, and let a deployment that does
+            // not compose one read undefined in the tool's own words.
+            get: (service) => {
+              try { return typeof ctx.get === 'function' ? ctx.get(service) : undefined } catch { return undefined }
+            },
           }
           const timer = setTimeout(() => controller.abort(), 120000)
           let out
@@ -701,9 +727,14 @@ export async function apply (ctx, config) {
     ctx.tools.register(tool({
       name: 'dsh_serve_status',
       description: 'Report whether this DSH session is serving its plugins to another host, and which tools are currently exposed.',
-      parameters: {},
+      parameters: { verbose: VERBOSE_ARG },
       output: OUT(),
-      execute: guarded(async () => JSON.stringify({ port: servePort, exposed: handlers.list() }, null, 1)),
+      execute: guarded(async (args) => {
+        const exposed = handlers.list()
+        const names = (exposed || []).map((x) => (x && x.name) || String(x))
+        if (args && args.verbose) return JSON.stringify({ port: servePort, exposed }, null, 1)
+        return JSON.stringify({ port: servePort, tools: names }, null, 1)
+      }),
     }))
   }
 

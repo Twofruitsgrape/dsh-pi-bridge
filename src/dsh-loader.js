@@ -180,6 +180,39 @@ export function rewriteBundleTree (dir, resolveSpec = hostEntry, opts) {
 }
 
 /**
+ * Resolve a bundle's Config schema into the runtime config object a host boot
+ * would have handed apply().
+ *
+ * A boot binds config from the profile through the plugin's Config schema; a
+ * runtime load has neither, and passing the schema through raw breaks every
+ * bundle that reads config.<field> instead of calling it. Measured on
+ * npm:dingpenghui/agnes-image: config.defaultSize reached a tool's JSON Schema
+ * `default` annotation as a schema node, and the host refused the whole
+ * registration with 'schema.properties.size.default annotation must be lossless
+ * JSON data' - an error that names the tool, not the cause.
+ *
+ * Schemastery schemas are callable functions (schema({}) resolves every
+ * default) and zod-style schemas resolve through .parse({}). A schema that
+ * requires a value no default supplies throws; that bundle keeps the raw schema
+ * argument so its own diagnostics still surface unchanged.
+ * @param {any} raw mod.default.config as the bundle exported it
+ * @returns {any} resolved defaults, or raw when the schema cannot resolve {}
+ */
+export function resolveBundleConfig (raw) {
+  if (raw == null) return {}
+  try {
+    if (typeof raw === 'function') {
+      const resolved = raw({})
+      if (resolved !== null && typeof resolved === 'object') return resolved
+    } else if (typeof raw.parse === 'function') {
+      const resolved = raw.parse({})
+      if (resolved !== null && typeof resolved === 'object') return resolved
+    }
+  } catch { /* the schema demands values a runtime load cannot supply */ }
+  return raw
+}
+
+/**
  * Load one bundle directory against a live DSH scope.
  * @param {string} dir bundle root
  * @param {any} ctx the scope this plugin was applied with
@@ -212,7 +245,8 @@ export async function loadDshBundle (dir, ctx, opts) {
   const registered = (opts && opts.registered) || new Set()
   // Recording wrappers so the caller learns what the bundle registered, while
   // the registrations themselves go to the real host.
-  const scope = observeScope(ctx, tools, commands, skillCount, registered, alreadyPresent, conflicts, flags)
+  const serviceGet = serviceGetter(ctx)
+  const scope = observeScope(ctx, tools, commands, skillCount, registered, alreadyPresent, conflicts, flags, serviceGet)
   try {
     const tree = rewriteBundleTree(dir, opts.resolveSpec || hostEntry, { log })
     if (tree.mapped.length) log('rewrote ' + tree.files + ' file(s), host specifiers: ' + tree.mapped.join(', '))
@@ -253,7 +287,7 @@ export async function loadDshBundle (dir, ctx, opts) {
     if (!declared.length && mod.default && Array.isArray(mod.default.inject)) declared.push(...mod.default.inject)
     const wider = declared.slice()
     for (const need of ['tools', 'commands']) if (!wider.includes(need)) wider.push(need)
-    const bundleConfig = (mod.default && mod.default.config) || {}
+    const bundleConfig = resolveBundleConfig((mod.default && mod.default.config) || mod.Config || mod.config || {})
     const attempts = wider.length === declared.length ? [wider] : [wider, declared]
     if (typeof ctx.inject === 'function') {
       let composed = false
@@ -274,7 +308,7 @@ export async function loadDshBundle (dir, ctx, opts) {
         try {
           await ctx.inject(names, (inner) => {
             ran = true
-            return apply(observeScope(inner, tools, commands, skillCount, registered, alreadyPresent, conflicts, flags), bundleConfig)
+            return apply(observeScope(inner, tools, commands, skillCount, registered, alreadyPresent, conflicts, flags, serviceGet), bundleConfig)
           })
         } catch (e) {
           if (ran) { bundleFailure = e; break }
@@ -373,6 +407,28 @@ export async function loadDshBundle (dir, ctx, opts) {
 }
 
 /**
+ * Resolve a service the way cordis's own ctx.get() does - from the store, with
+ * no inject requirement.
+ *
+ * The scope cordis hands an inject() callback is not a full Context: measured on
+ * a live session, it carries tools/commands but no get(). Bundle execute() blocks
+ * read optional services through ctx.get (npm:dingpenghui/agnes-image resolves
+ * 'credentials' and 'attachments' that way), so without this every such call
+ * dies with 'ctx.get is not a function'. The root context this plugin runs in IS
+ * a Context; a service the deployment does not compose stays undefined and the
+ * bundle reports that in its own words.
+ * @param {any} ctx the scope loadDshBundle was applied with
+ * @returns {((name:string)=>any)|undefined}
+ */
+function serviceGetter (ctx) {
+  const get = ctx && typeof ctx.get === 'function' ? ctx.get : null
+  if (!get) return undefined
+  return (name) => {
+    try { return get.call(ctx, name) } catch { return undefined }
+  }
+}
+
+/**
  * A scope view that records registrations without touching the real scope.
  *
  * The host scope forbids property assignment ("cannot set property "tools" in
@@ -382,7 +438,7 @@ export async function loadDshBundle (dir, ctx, opts) {
  * bundle registers for real and the host accepts it exactly as it accepts a
  * boot-time plugin.
  */
-function observeScope (ctx, tools, commands, skillCounter, registered, alreadyPresent, conflicts, flags) {
+function observeScope (ctx, tools, commands, skillCounter, registered, alreadyPresent, conflicts, flags, serviceGet) {
   const recording = (kind, sink) => {
     const real = ctx[kind]
     return new Proxy(real, {
@@ -425,8 +481,13 @@ function observeScope (ctx, tools, commands, skillCounter, registered, alreadyPr
         if (typeof inject !== 'function') return inject
         return (names, fn) => {
           flags.deferred = true
-          return inject.call(target, names, (inner) => fn(observeScope(inner, tools, commands, skillCounter, registered, alreadyPresent, conflicts, flags)))
+          return inject.call(target, names, (inner) => fn(observeScope(inner, tools, commands, skillCounter, registered, alreadyPresent, conflicts, flags, serviceGet)))
         }
+      }
+      if (prop === 'get') {
+        const own = target.get
+        if (typeof own === 'function') return own.bind(target)
+        return serviceGet
       }
       if (prop === 'tools' && target.tools) return recording('tools', tools)
       if (prop === 'commands' && target.commands) return recording('commands', commands)
