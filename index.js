@@ -28,6 +28,7 @@ import { startDshServer } from './src/serve.js'
 import { projectResult } from './src/capabilities.js'
 import { CACHE_ROOT } from './src/resolve.js'
 import { createDetachedScope } from './src/detached-scope.js'
+import { readRegistry as readRegistryFile, updateRegistry } from './src/registry.js'
 
 export const name = 'dsh-pi-bridge'
 export const inject = ['tools']
@@ -98,30 +99,14 @@ function defineHostTool (options) {
  */
 const VERBOSE_ARG = { type: 'boolean', description: 'Return the full raw state JSON instead of the short summary.' }
 
-async function readRegistry () {
-  try { return JSON.parse(await readFile(REGISTRY_FILE, 'utf8')) } catch { return { bridges: {} } }
-}
-
 /**
- * Record this host's bridges without erasing the other host's.
+ * Persist only the keys this call changes, then make the in-memory view match disk.
  *
- * Both halves share one file. Writing our own snapshot back would drop an entry
- * the other host recorded while we were working, so merge over the newest copy on
- * disk. Removed keys are passed explicitly, because a plain merge would otherwise
- * resurrect an entry that bridge_remove just forgot.
- *
- * @param {any} state
- * @param {string[]} [removed]
+ * Passing the whole in-memory map back would resurrect entries another process
+ * removed; see src/registry.js.
  */
-async function writeRegistry (state, removed) {
-  await mkdir(CACHE_ROOT, { recursive: true })
-  let merged = { bridges: {} }
-  try { merged = JSON.parse(await readFile(REGISTRY_FILE, 'utf8')) } catch { /* first write */ }
-  merged.bridges = merged.bridges || {}
-  for (const [k, v] of Object.entries(state.bridges || {})) merged.bridges[k] = v
-  for (const k of removed || []) delete merged.bridges[k]
-  state.bridges = merged.bridges
-  await writeFile(REGISTRY_FILE, JSON.stringify(merged, null, 2), 'utf8')
+async function persistBridges (state, change) {
+  state.bridges = await updateRegistry(REGISTRY_FILE, change)
 }
 
 function defaultPrefix (spec) {
@@ -178,7 +163,7 @@ async function previewText (spec) {
 export async function apply (ctx, config) {
   void config
   const tool = defineHostTool
-  const state = await readRegistry()
+  const state = await readRegistryFile(REGISTRY_FILE)
   state.bridges = state.bridges || {}
   const log = (m) => { try { ctx.logger && ctx.logger.info && ctx.logger.info(m) } catch { /* ignore */ } }
 
@@ -412,7 +397,7 @@ export async function apply (ctx, config) {
     for (const c of loaded.commands || []) report.commands.push(c.name)
     for (const dir of materialized.skills || []) report.skills.push(path.basename(dir))
     mountSkills(materialized.skills)
-    state.bridges[spec] = {
+    const record = {
       name: materialized.info.name,
       version: materialized.info.version,
       host: 'pi',
@@ -422,7 +407,7 @@ export async function apply (ctx, config) {
       report,
       at: new Date().toISOString(),
     }
-    await writeRegistry(state)
+    await persistBridges(state, { upserts: { [spec]: record } })
     return formatReport(spec, materialized.info, report)
   }
 
@@ -467,8 +452,8 @@ export async function apply (ctx, config) {
       if (!args.refresh) {
         const recalled = recallBundle(key)
         if (recalled) {
-          state.bridges[args.source] = { ...(state.bridges[args.source] || {}), name: recalled.name, mode: 'host-load', root: m.root, at: new Date().toISOString() }
-          await writeRegistry(state)
+          const record = { ...(state.bridges[args.source] || {}), name: recalled.name, mode: 'host-load', root: m.root, at: new Date().toISOString() }
+          await persistBridges(state, { upserts: { [args.source]: record } })
           return ['loaded ' + recalled.name + '@' + (recalled.version || m.info.version) + ' (already loaded in this session)']
             .concat(['  dependencies: ' + ((m.dependencies && m.dependencies.status) || 'n/a')], formatLoaded(recalled)).join('\n')
         }
@@ -495,11 +480,11 @@ export async function apply (ctx, config) {
         skipped: [],
         host: 'dsh',
       }
-      state.bridges[args.source] = {
+      const record = {
         name: loaded.name, version: m.info.version, host: 'dsh', mode: 'host-load',
         root: m.root, report, at: new Date().toISOString(),
       }
-      await writeRegistry(state)
+      await persistBridges(state, { upserts: { [args.source]: record } })
       const lines = ['loaded ' + loaded.name + '@' + m.info.version + ' into this DSH session',
         '  dependencies: ' + ((m.dependencies && m.dependencies.status) || 'n/a')]
         .concat(formatLoaded(loaded))
@@ -530,10 +515,14 @@ export async function apply (ctx, config) {
     parameters: { source: { ...SOURCE, description: 'The exact source string previously installed.' } },
     output: OUT(),
     execute: guarded(async (args) => {
-      if (!state.bridges[args.source]) return 'not bridged: ' + args.source
-      const entry = state.bridges[args.source]
-      delete state.bridges[args.source]
-      await writeRegistry(state, [args.source])
+      // The registry is machine-shared, and this instance's map is the boot
+      // snapshot: an entry another host recorded later is on disk but not in
+      // memory. Measured live - pi installed a bundle, the DSH realm answered
+      // 'not bridged' for a source the user could see in the file. Read disk.
+      const onDisk = await readRegistryFile(REGISTRY_FILE)
+      const entry = (onDisk.bridges && onDisk.bridges[args.source]) || state.bridges[args.source]
+      if (!entry) return 'not bridged: ' + args.source
+      await persistBridges(state, { removed: [args.source] })
       const target = entry.root || entry.mirror
       if (target) await rm(target, { recursive: true, force: true })
       return 'removed ' + args.source + ' from the bridge registry (restart DSH to drop its registrations)'
@@ -704,12 +693,6 @@ export async function apply (ctx, config) {
             arguments: args || {},
             signal: controller.signal,
             agent: undefined,
-            // Host services are the deployment's, not the agent's: resolve them
-            // from the scope this plugin runs in, and let a deployment that does
-            // not compose one read undefined in the tool's own words.
-            get: (service) => {
-              try { return typeof ctx.get === 'function' ? ctx.get(service) : undefined } catch { return undefined }
-            },
           }
           const timer = setTimeout(() => controller.abort(), 120000)
           let out

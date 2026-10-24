@@ -15,6 +15,7 @@ const SUITES = [
   ["host entries", ["scripts/entry-check.mjs"]],
   ["self-bridge", ["tools/selfhost-check.mjs"]],
   ["loader rules", ["scripts/loader-unit.mjs"]],
+  ["bridge registry", ["scripts/registry-unit.mjs"]],
   ["pi proxy", ["daemon/acceptance.mjs"]],
   ["dsh proxy (DSH side)", ["daemon/dsh-proxy-e2e.mjs"]],
   ["dsh host forwarding (pi side)", ["daemon/dsh-host-e2e.mjs"]],

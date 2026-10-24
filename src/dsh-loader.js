@@ -26,13 +26,24 @@ export function isHostSpecifier (s) {
   return HOST_PREFIXES.some((p) => s === p || s.startsWith(p.endsWith('/') ? p : p + '/'))
 }
 
-/** The installed build's own node_modules roots, reachable only under Electron. */
+/**
+ * The installed build's own node_modules roots.
+ *
+ * Two layouts exist in the wild: the 0.2.1 desktop ships the runtime UNPACKED at
+ * resources/app/, while older installs keep it in resources/app.asar. Measured on
+ * 0.2.1-rc.3: app.asar was gone and the asar-only root list resolved nothing, so
+ * every bare '@deepseek-ai/*' import from a bundle would have failed with
+ * MODULE_NOT_FOUND - the exact failure this loader exists to prevent.
+ */
 export function hostModulesRoots (execPath = process.execPath) {
-  const root = path.dirname(String(execPath || ''))
+  const exe = String(execPath || '')
+  if (!exe) return []
+  const resources = path.join(path.dirname(exe), 'resources')
   return [
-    path.join(root, 'resources', 'app.asar', 'dsh', 'node_modules'),
-    path.join(root, 'resources', 'app.asar.unpacked', 'dsh', 'node_modules'),
-  ].filter((r) => r !== path.join('', 'resources'))
+    path.join(resources, 'app', 'dsh', 'node_modules'),
+    path.join(resources, 'app.asar', 'dsh', 'node_modules'),
+    path.join(resources, 'app.asar.unpacked', 'dsh', 'node_modules'),
+  ]
 }
 
 /** Resolve one host specifier to a real module file inside the running build. */

@@ -15,6 +15,7 @@
 import { loadForeign } from "../src/load.js";
 import { replayIntoPi } from "../src/replay-pi.js";
 import { CACHE_ROOT } from "../src/resolve.js";
+import { updateRegistry } from "../src/registry.js";
 import { restoreIntoPi } from "../src/restore.js";
 import { dshHostStatus, dshHostLoad, dshHostCall, dshParamsToSchema, dshEndpoint } from "../src/dsh-host-client.js";
 
@@ -30,19 +31,6 @@ async function readState() {
   }
 }
 
-async function writeState(state, opts) {
-  const { mkdir, writeFile } = await import("node:fs/promises");
-  await mkdir(CACHE_ROOT, { recursive: true });
-  // Merge over the newest copy on disk: DSH may have recorded an entry while
-  // this write was being prepared, and overwriting the file would erase it.
-  // Removed keys are passed in, since a merge alone would resurrect them.
-  let merged = { bridges: {} }
-  try { merged = JSON.parse(await readFile(REGISTRY, "utf8")) } catch { /* first write */ }
-  merged.bridges = merged.bridges || {}
-  for (const [k, v] of Object.entries(state.bridges || {})) merged.bridges[k] = v
-  for (const k of (opts && opts.removed) || []) delete merged.bridges[k]
-  await writeFile(REGISTRY, JSON.stringify(merged, null, 2), "utf8");
-}
 
 function shortPrefix(name) {
   const s = String(name)
@@ -165,23 +153,19 @@ export default async function (pi) {
   async function installDsh(spec, opts) {
     if (await liveDshAvailable()) {
       const viaHost = await installDshViaHost(spec, opts);
-      const state = await readState();
-      state.bridges = state.bridges || {};
-      state.bridges[spec] = {
+      const record = {
         name: (viaHost.loaded && viaHost.loaded.name) || spec,
         version: String((viaHost.loaded && viaHost.loaded.version) || "0"),
         host: "dsh", prefix: viaHost.prefix, mirror: "", report: viaHost.report, mode: viaHost.mode,
         at: new Date().toISOString(),
       };
-      await writeState(state);
+      await updateRegistry(REGISTRY, { upserts: { [spec]: record } });
       return formatReport(spec + " (via live DSH)", { info: { name: (viaHost.loaded && viaHost.loaded.name) || spec, version: (viaHost.loaded && viaHost.loaded.version) || "" } }, viaHost.report);
     }
     const captured = await loadForeign(spec, { host: "dsh", refresh: !!(opts && opts.refresh) });
     const prefix = (opts && opts.prefix) || shortPrefix(captured.info.name);
     const report = replayIntoPi(pi, captured, { prefix });
-    const state = await readState();
-    state.bridges = state.bridges || {};
-    state.bridges[spec] = {
+    const record = {
       name: captured.info.name,
       version: captured.info.version,
       host: "dsh",
@@ -191,7 +175,7 @@ export default async function (pi) {
       mode: "replay",
       at: new Date().toISOString(),
     };
-    await writeState(state);
+    await updateRegistry(REGISTRY, { upserts: { [spec]: record } });
     return formatReport(spec, captured, report, "replay");
   }
 
@@ -248,8 +232,7 @@ export default async function (pi) {
         return notify(ctx, "not bridged: " + (spec || "(no source given)"), "error");
       }
       const entry = state.bridges[spec];
-      delete state.bridges[spec];
-      await writeState(state, { removed: [params.source] });
+      await updateRegistry(REGISTRY, { removed: [spec] });
       const { rm } = await import("node:fs/promises");
       if (entry.mirror) await rm(entry.mirror, { recursive: true, force: true });
       notify(ctx, "removed " + spec + " (tools registered earlier stay until pi restarts)", "info");

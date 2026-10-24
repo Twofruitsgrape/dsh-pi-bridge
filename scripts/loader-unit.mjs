@@ -1,6 +1,7 @@
 // Unit checks for the runtime DSH bundle loader: specifier classification and
 // host rewriting. They need no host, so they can gate the publish path.
-import { isHostSpecifier, rewriteHostSpecifiers, rewriteBundleTree, hostModulesRoots } from "../src/dsh-loader.js"
+import { isHostSpecifier, rewriteHostSpecifiers, rewriteBundleTree, hostModulesRoots, resolveBundleConfig } from "../src/dsh-loader.js"
+import { toToolSchema } from "../src/schema.js"
 import { fileURLToPath } from "node:url"
 import path from "node:path"
 import { mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs"
@@ -224,7 +225,11 @@ const { loadDshBundle } = await import('../src/dsh-loader.js')
 }
 
 const roots = hostModulesRoots("C:/App/DeepSeek Harness.exe")
-check("derives two roots from execPath", roots.length === 2 && roots[0].includes("app.asar") && roots[1].includes("asar.unpacked"), JSON.stringify(roots))
+check("finds the unpacked runtime the 0.2.1 layout ships",
+  roots[0] === "C:\\App\\resources\\app\\dsh\\node_modules", JSON.stringify(roots))
+check("keeps the legacy asar roots for older installs",
+  roots.some((r) => r.endsWith("app.asar\\dsh\\node_modules")) && roots.some((r) => r.endsWith("app.asar.unpacked\\dsh\\node_modules")), JSON.stringify(roots))
+check("an empty execPath derives no roots", hostModulesRoots("").length === 0, JSON.stringify(hostModulesRoots("")))
 
 // The scope must see service entries that land AFTER it was built. Measured live
 // on a GUI boot: the caller probes webServer through async ctx.inject callbacks
@@ -317,6 +322,46 @@ check("derives two roots from execPath", roots.length === 2 && roots[0].includes
     scope.missing(['defined-thing']).length === 1 &&
     scope.reflect.define('defined-thing', 1) !== undefined &&
     scope.missing(['defined-thing']).length === 0, '')
+}
+
+// A bundle's Config schema resolves to its defaults; passing the schema through
+// raw is what made agnes-image's tool defaults non-lossless JSON.
+{
+  const callableSchema = (data) => ({ model: "m1", defaultSize: "1K", ...data })
+  const resolved = resolveBundleConfig(callableSchema)
+  check("a callable schema resolves to its defaults", resolved.defaultSize === "1K" && resolved.model === "m1", JSON.stringify(resolved))
+  const parseSchema = { parse: (data) => ({ defaultRatio: "1:1", ...data }) }
+  check("a parse-style schema resolves through parse({})", resolveBundleConfig(parseSchema).defaultRatio === "1:1")
+  const demanding = () => { throw new Error("requires a value") }
+  check("a schema that demands a value keeps the raw argument", resolveBundleConfig(demanding) === demanding)
+  check("a missing config resolves to an empty object", JSON.stringify(resolveBundleConfig(null)) === "{}")
+  check("a plain config object passes through", resolveBundleConfig({ x: 1 }).x === 1)
+}
+
+// ctx.get() is how a bundle's execute() reads host services; the detached scope
+// must answer it from the snapshot, on the root scope and inside inject children.
+{
+  const credentials = { resolve: () => "k" }
+  const scope = createDetachedScope({ credentials })
+  check("detached scope get() returns the snapshot service", scope.get("credentials") === credentials)
+  check("detached scope get() leaves an uncaptured name undefined", scope.get("attachments") === undefined)
+  let inner = "callback-not-run"
+  scope.inject(["credentials"], (child) => { inner = child.get("credentials") })
+  check("an inject child carries get() too", inner === credentials, String(inner))
+  const toolsService = { register: () => ({ dispose () {} }) }
+  const wide = createDetachedScope({ credentials, tools: toolsService, commands: {} })
+  let unnamed = "callback-not-run"
+  wide.inject(["commands"], (child) => { unnamed = child.tools })
+  check("an inject child still sees services it did not name", unnamed === toolsService, String(unnamed))
+}
+
+// Tool parameters reach the host as a compiled object schema. An empty map that
+// compiles to nothing is the 'type: null' the provider refused the whole turn over.
+{
+  const empty = toToolSchema({})
+  check("an empty parameter map compiles to an object schema", empty.type === "object" && typeof empty.properties === "object", JSON.stringify(empty))
+  const withBool = toToolSchema({ verbose: { type: "boolean", description: "d" } })
+  check("a boolean parameter lands in the compiled properties", withBool.properties.verbose.type === "boolean", JSON.stringify(withBool))
 }
 
 console.log("")

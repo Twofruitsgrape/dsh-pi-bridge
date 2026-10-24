@@ -94,7 +94,13 @@ export function createDetachedScope (snapshot, opts) {
       // The loader detects the refusal through its own ran-flag and reports the
       // named service as not composed, which is the truth of the snapshot.
       if (list.some((n) => services[n] === undefined)) return undefined
+      // A cordis inject child still sees the parent's services; it only ADDS the
+      // named ones as required. Handing it just the listed names broke a real
+      // pattern - registering a tool from inside inject(['commands'], inner =>
+      // inner.tools.register(...)) died on "reading 'register'". The plugin()
+      // child below carries the same shape for the same reason.
       const child = {}
+      for (const [n, v] of Object.entries(services)) child[n] = v
       for (const n of list) child[n] = services[n]
       child.effect = effectShim
       child.inject = base.inject.bind(base)
