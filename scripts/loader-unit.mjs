@@ -231,6 +231,16 @@ check("keeps the legacy asar roots for older installs",
   roots.some((r) => r.endsWith("app.asar\\dsh\\node_modules")) && roots.some((r) => r.endsWith("app.asar.unpacked\\dsh\\node_modules")), JSON.stringify(roots))
 check("an empty execPath derives no roots", hostModulesRoots("").length === 0, JSON.stringify(hostModulesRoots("")))
 
+{
+  const staleUrl = "file:///C:/Apps/resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-tools/lib/index.js"
+  const staleSrc = 'import { defineTool } from "' + staleUrl + '"'
+  const healed = rewriteHostSpecifiers(staleSrc, () => null, { hostRoots: [process.cwd()] })
+  check("a stale asar host url is repointed at the running build",
+    !healed.code.includes("app.asar") && healed.code.includes("@deepseek-ai/dsh-tools/lib/index.js"), healed.code)
+  const kept = rewriteHostSpecifiers(staleSrc, () => null, { hostRoots: ["C:/no-such-host-root-for-this-test"] })
+  check("a stale url with no current root is left untouched", kept.code.includes("app.asar"), kept.code)
+}
+
 // The scope must see service entries that land AFTER it was built. Measured live
 // on a GUI boot: the caller probes webServer through async ctx.inject callbacks
 // that settle after apply() finished the synchronous part, and a scope that

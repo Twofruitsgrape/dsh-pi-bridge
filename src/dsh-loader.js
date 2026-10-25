@@ -66,7 +66,7 @@ function toUrl (file) {
  * @param {string} source
  * @param {(spec:string)=>string|null} resolveSpec
  */
-export function rewriteHostSpecifiers (source, resolveSpec = hostEntry) {
+export function rewriteHostSpecifiers (source, resolveSpec = hostEntry, options = {}) {
   const mapped = []
   // Three shapes carry a specifier: from 'x', import('x'), and a bare side-effect
   // import 'x' with no from at all. The third was missing, so a bundle whose
@@ -75,7 +75,7 @@ export function rewriteHostSpecifiers (source, resolveSpec = hostEntry) {
   // a package the product does not ship, when the product ships it and I had just
   // failed to rewrite the one line that asked for it. (@furongjun1999/dsh-memory,
   // measured: the specifier resolves fine from the build's own node_modules.)
-  const code = source.replace(/(\bfrom\s+|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"\n]+)\2/g, (whole, head, quote, spec) => {
+  let code = source.replace(/(\bfrom\s+|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"\n]+)\2/g, (whole, head, quote, spec) => {
     // A plain builtin ('fs/promises', 'path') must also stay untouched: hostEntry
     // resolves a builtin to its own bare name and toUrl would then publish a fake
     // "file://path" import URL. Measured in the hot-100 DSH batch, chunk 1: two
@@ -88,6 +88,24 @@ export function rewriteHostSpecifiers (source, resolveSpec = hostEntry) {
     mapped.push({ specifier: spec, target: file })
     return head + '"' + toUrl(file) + '"'
   })
+  // A cached copy may already carry a host URL written by the same rewriter
+  // under the layout the host had at the time. 0.2.1-rc.3 moved the runtime
+  // out of app.asar, and every cached file kept an app.asar URL that no
+  // longer exists (710 files measured; the first load after the upgrade died
+  // on MODULE_NOT_FOUND). Such a URL is invisible to the bare-specifier pass
+  // above, so repoint it at the running build. With no root on disk the URL
+  // is left exactly as it was: guessing a path would be worse than the error.
+  const roots = (options && options.hostRoots) || hostModulesRoots()
+  const currentRoot = roots.find((r) => existsSync(r))
+  if (currentRoot) {
+    code = code.replace(/(['"])file:\/\/\/[^'"\n]*?\/resources\/(?:app\.asar\.unpacked|app\.asar|app)\/dsh\/node_modules\/([^'"\n]+)\1/g,
+      (whole, quote, rest) => {
+        const target = toUrl(currentRoot) + '/' + rest
+        const seg = rest.split('/')
+        mapped.push({ specifier: seg[0].startsWith('@') ? seg.slice(0, 2).join('/') : seg[0], target, healed: true })
+        return quote + target + quote
+      })
+  }
   return { code, mapped }
 }
 
@@ -180,7 +198,7 @@ export function rewriteBundleTree (dir, resolveSpec = hostEntry, opts) {
       try { source = readFileSync(full, 'utf8') } catch { continue }
       files++
       if (!/from\s+['"]|import\s*\(|^\s*import\s+['"]/m.test(source)) continue
-      const { code, mapped: hits } = rewriteHostSpecifiers(source, withPeerFallback)
+      const { code, mapped: hits } = rewriteHostSpecifiers(source, withPeerFallback, opts)
       if (!hits.length) continue
       for (const h of hits) mapped.add(h.specifier)
       try { writeFileSync(full, code, 'utf8') } catch (err) { log('could not rewrite ' + e.name + ': ' + String(err && err.code)) }
