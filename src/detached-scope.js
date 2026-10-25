@@ -71,6 +71,104 @@ export function createDetachedScope (snapshot, opts) {
     return { dispose () {} }
   }
 
+  /**
+   * cordis-plugin-timer mixes timeout/interval/setTimeout/setInterval/
+   * throttle/debounce into every real context. A bundle that calls ctx.interval()
+   * therefore works on a live host and died here with "ctx.interval is not a
+   * function" (measured: dsh-bottom-info-bar). The callback form returns a
+   * disposer and the no-callback form returns a promise or an async iterator, as
+   * the timer service does; every pending timer is cleared when the scope disposes.
+   */
+  const timers = new Set()
+  const trackTimer = (stop) => {
+    let stopped = false
+    const dispose = () => {
+      if (stopped) return
+      stopped = true
+      timers.delete(dispose)
+      try { stop() } catch { /* already cleared */ }
+    }
+    timers.add(dispose)
+    return dispose
+  }
+  const timerHelpers = {
+    timeout (...args) {
+      const callback = typeof args[0] === 'function' ? args.shift() : undefined
+      const delay = Number(args[0]) || 0
+      let handle = null
+      if (callback) {
+        const dispose = trackTimer(() => { if (handle !== null) clearTimeout(handle) })
+        handle = setTimeout(() => { dispose(); try { callback() } catch (e) { log('detached timeout failed: ' + String((e && e.message) || e).slice(0, 120)) } }, delay)
+        return dispose
+      }
+      const { promise, resolve, reject } = Promise.withResolvers()
+      const dispose = trackTimer(() => { if (handle !== null) clearTimeout(handle); reject(new Error('Context has been disposed')) })
+      handle = setTimeout(() => { dispose(); resolve(undefined) }, delay)
+      return promise
+    },
+    interval (...args) {
+      const callback = typeof args[0] === 'function' ? args.shift() : undefined
+      const delay = Number(args[0]) || 0
+      let handle = null
+      if (callback) {
+        const dispose = trackTimer(() => { if (handle !== null) clearInterval(handle) })
+        handle = setInterval(() => { try { callback() } catch (e) { log('detached interval failed: ' + String((e && e.message) || e).slice(0, 120)) } }, delay)
+        return dispose
+      }
+      const queue = []
+      let waiter = null
+      let stopped = false
+      const dispose = trackTimer(() => {
+        stopped = true
+        if (handle !== null) clearInterval(handle)
+        if (waiter) { const w = waiter; waiter = null; w.reject(new Error('Context has been disposed')) }
+      })
+      handle = setInterval(() => {
+        if (stopped) return
+        const item = { done: false, value: undefined }
+        if (waiter) { const w = waiter; waiter = null; w.resolve(item) } else queue.push(item)
+      }, delay)
+      return {
+        [Symbol.asyncIterator] () { return this },
+        next () {
+          if (queue.length) return Promise.resolve(queue.shift())
+          if (stopped) return Promise.resolve({ done: true, value: undefined })
+          return new Promise((resolve, reject) => { waiter = { resolve, reject } })
+        },
+        return () { dispose(); return Promise.resolve({ done: true, value: undefined }) },
+      }
+    },
+    setTimeout (callback, delay) { return timerHelpers.timeout(callback, delay) },
+    setInterval (callback, delay) { return timerHelpers.interval(callback, delay) },
+    throttle (callback, delay) {
+      let last = 0
+      let handle = null
+      let pending = null
+      const dispose = trackTimer(() => { if (handle !== null) clearTimeout(handle) })
+      const wrapped = (...args) => {
+        const now = Date.now()
+        if (now - last >= delay) { last = now; return callback(...args) }
+        pending = args
+        if (handle === null) {
+          handle = setTimeout(() => { handle = null; last = Date.now(); const a = pending; pending = null; if (a) callback(...a) }, Math.max(0, delay - (now - last)))
+        }
+        return undefined
+      }
+      wrapped.dispose = dispose
+      return wrapped
+    },
+    debounce (callback, delay) {
+      let handle = null
+      const wrapped = (...args) => {
+        if (handle !== null) clearTimeout(handle)
+        handle = setTimeout(() => { handle = null; callback(...args) }, delay)
+      }
+      wrapped.dispose = trackTimer(() => { if (handle !== null) clearTimeout(handle) })
+      return wrapped
+    },
+  }
+  const TIMER_KEYS = ['timeout', 'interval', 'setTimeout', 'setInterval', 'throttle', 'debounce']
+
   const ev = services.events
   const base = {
     effect: effectShim,
@@ -119,6 +217,7 @@ export function createDetachedScope (snapshot, opts) {
       child.plugin = base.plugin
       child.missing = base.missing
       child.reflect = base.reflect
+      for (const k of TIMER_KEYS) child[k] = base[k]
       children.push(child)
       // Propagate a throwing callback: a bundle that fails while registering is
       // the bundle problem and the loader reports it with the bundle name.
@@ -135,10 +234,18 @@ export function createDetachedScope (snapshot, opts) {
       // reported load failure for that one bundle.
       const out = callback(child)
       if (out && typeof out.then === 'function') {
-        return out.then(
+        // A bundle's own ctx.inject([...], async () => ...) is never awaited by the
+        // loader, and rethrowing into that unowned promise is an unhandled
+        // rejection - which terminates the host process. Measured: npm:@michengai/
+        // dsh-automation rejected inside a deferred callback and the whole serve
+        // session died mid-batch. The chained catch keeps the rejection visible to
+        // a caller that awaits while leaving no promise without a handler.
+        const chained = out.then(
           () => ({ dispose () {} }),
           (e) => { throw e },
         )
+        chained.catch((e) => { log('detached inject callback rejected: ' + String((e && e.message) || e).slice(0, 160)) })
+        return chained
       }
       return { dispose () {} }
     },
@@ -218,8 +325,14 @@ export function createDetachedScope (snapshot, opts) {
       // declared names still gate whether the helper runs at all.
       for (const [n, v] of Object.entries(services)) child[n] = v
       for (const k of ['effect', 'on', 'once', 'emit', 'inject', 'provide', 'plugin', 'missing', 'reflect']) child[k] = base[k]
+      for (const k of TIMER_KEYS) child[k] = base[k]
       children.push(child)
-      const out = applyFn(child, config)
+      // cordis instantiates a plugin given as a class (a Service subclass is the
+      // normal shape); calling it as a function is what produced "Class constructor
+      // X cannot be invoked without 'new'" for npm:dsh-browser-playwright-codex and
+      // npm:@wenaixi/dsh-ponytail. An apply-function plugin is still called.
+      const isClass = typeof resolved === 'function' && /^\s*class[\s{]/.test(Function.prototype.toString.call(resolved))
+      const out = isClass ? new resolved(child, config) : applyFn(child, config)
       if (out && typeof out.then === 'function') {
         const chained = out.then(() => ({ dispose () {} }), (e) => { throw e })
         chained.catch((e) => { log('detached plugin rejected: ' + String((e && e.message) || e).slice(0, 120)) })
@@ -229,6 +342,7 @@ export function createDetachedScope (snapshot, opts) {
     },
   }
   for (const [k, v] of Object.entries(services)) base[k] = v
+  Object.assign(base, timerHelpers)
 
   const scope = new Proxy(base, {
     get (target, prop) {
@@ -248,6 +362,7 @@ export function createDetachedScope (snapshot, opts) {
     for (const fn of pending) {
       try { const r = fn(); if (r && typeof r.then === "function") r.then(null, () => {}) } catch { /* one bad cleanup must not block the rest */ }
     }
+    for (const stop of [...timers]) { try { stop() } catch { /* already stopped */ } }
     children.length = 0
     return pending.length
   }

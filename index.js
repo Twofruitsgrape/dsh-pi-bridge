@@ -199,6 +199,29 @@ export async function apply (ctx, config) {
    */
   const CANDIDATES = ['web', 'webServer', 'fs', 'sessionPersistence', 'credentials', 'connection', 'agentDefaultModel', 'model', 'channels', 'dialogs', 'prompt', 'gui', 'browser', 'typert', 'workspaceRegistry', 'sessionProjectionCache', 'http', 'profile', 'registry', 'hot', 'scopes', 'resolve', 'paths', 'jobs', 'llm', 'commands', 'skills', 'webApp', 'webRuntime']
   /**
+   * Names real published bundles ask for. Measured on a 40-bundle batch against
+   * this session: agents, systemPrompt, sessionController, sessions, agentPresets,
+   * settings, attachments, timer, subprocess and the *Controller family accounted
+   * for most refusals, and every one of them is an ordinary store service.
+   */
+  const DECLARED = ['agents', 'subagents', 'sessions', 'sessionController', 'sessionQuery', 'sessionPersistence', 'storageDomain', 'systemPrompt', 'agentPresets', 'permissionPresets', 'settings', 'timer', 'subprocess', 'attachments', 'tokenMeter', 'loader', 'mail', 'workspaceController', 'settingsController', 'credentialsController', 'workspace', 'workspaceRegistry', 'usage', 'usageMeter', 'sessionTitle', 'agentLoop', 'shell', 'sandbox', 'timer', 'dshHomePath', 'approval', 'sandboxPolicy', 'mcp', 'mcpRegistry', 'plugins', 'pluginManager', 'extensions', 'commands', 'skills', 'tools', 'llm', 'fs', 'jobs', 'typert', 'connection', 'webServer', 'webApp']
+  const PROBED = [...new Set(CANDIDATES.concat(DECLARED))]
+  /**
+   * Fill the snapshot from the store first. ctx.get(name) is cordis' own
+   * inject-free read, and it answers for services this fiber never declared -
+   * the inject probe below only exists because a property read does not.
+   * Without this pass the snapshot held whatever the bridge itself declares plus
+   * a short hand-written list, so a session that composed agents and systemPrompt
+   * still told a bundle they were missing.
+   */
+  for (const name of PROBED) {
+    try {
+      const value = typeof ctx.get === 'function' ? ctx.get(name) : undefined
+      if (value !== undefined) serviceSnapshot[name] = value
+    } catch { /* a name this build does not provide */ }
+  }
+  const toProbe = PROBED.filter((name) => serviceSnapshot[name] === undefined)
+  /**
    * Collect every probe before the snapshot is handed to the detached scope.
    *
    * Two measured facts force the await. First, each candidate runs through
@@ -217,7 +240,7 @@ export async function apply (ctx, config) {
    */
   const probeOutcomes = {}
   const PROBE_CAP_MS = 2500
-  await Promise.allSettled(CANDIDATES.map((name) => new Promise((resolve) => {
+  await Promise.allSettled(toProbe.map((name) => new Promise((resolve) => {
     probeOutcomes[name] = 'launched'
     let done = (why) => { probeOutcomes[name] = why; resolve() }
     const timer = setTimeout(() => done(probeOutcomes[name] === 'fired' ? 'fired' : 'no-callback-by-cap'), PROBE_CAP_MS)

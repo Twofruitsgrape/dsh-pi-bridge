@@ -363,6 +363,32 @@ check("an empty execPath derives no roots", hostModulesRoots("").length === 0, J
   let unnamed = "callback-not-run"
   wide.inject(["commands"], (child) => { unnamed = child.tools })
   check("an inject child still sees services it did not name", unnamed === toolsService, String(unnamed))
+  {
+    // A bundle's own un-awaited ctx.inject(..., async () => { throw }) used to become
+    // an unhandled rejection and kill the host process (npm:@michengai/dsh-automation).
+    const rejectScope = createDetachedScope({ tools: toolsService })
+    const handle = rejectScope.inject(["tools"], async () => { throw new Error("deferred boom") })
+    let observed = false
+    try { await handle } catch { observed = true }
+    check("a rejecting inject callback stays visible to an awaiting caller", observed)
+    const ignoredScope = createDetachedScope({ tools: toolsService })
+    const leaked = []
+    const onLeak = (e) => leaked.push(String((e && e.message) || e).slice(0, 80))
+    process.on("unhandledRejection", onLeak)
+    try {
+      ignoredScope.inject(["tools"], async () => { throw new Error("unobserved boom") })
+      await new Promise((r) => setTimeout(r, 50))
+    } finally { process.off("unhandledRejection", onLeak) }
+    check("an ignored rejecting inject handle is not reported as unhandled", leaked.length === 0, leaked.join(" | "))
+  }
+  {
+    let built = null
+    class Svc { constructor (ctx, cfg) { built = { hasTools: !!ctx.tools, cfg } } }
+    const classScope = createDetachedScope({ tools: toolsService })
+    classScope.plugin(Svc, { a: 1 })
+    check("a plugin given as a class is constructed, not called",
+      built !== null && built.hasTools === true && built.cfg.a === 1, JSON.stringify(built))
+  }
 }
 
 // Tool parameters reach the host as a compiled object schema. An empty map that
