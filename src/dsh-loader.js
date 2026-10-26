@@ -300,6 +300,15 @@ export async function loadDshBundle (dir, ctx, opts) {
   // Recording wrappers so the caller learns what the bundle registered, while
   // the registrations themselves go to the real host.
   const serviceGet = serviceGetter(ctx)
+  // Where this load starts in the scope's failure list.
+  //
+  // The detached scope outlives a load - the serve endpoint creates one per
+  // session - so its contained failures accumulate. Reading the whole list made
+  // one real failure poison every later report: measured on pid 34408, a single
+  // webServer containment turned the next 37 loads into identical "failures" of
+  // packages that were fine. Attribution is per call, which is the same lesson
+  // this file already learned about the error array.
+  const containedBase = Array.isArray(ctx && ctx.containedFailures) ? ctx.containedFailures.length : 0
   const scope = observeScope(ctx, tools, commands, skillCount, registered, alreadyPresent, conflicts, flags, serviceGet)
   try {
     const tree = rewriteBundleTree(dir, opts.resolveSpec || hostEntry, { log, entry: entryFile })
@@ -460,7 +469,7 @@ export async function loadDshBundle (dir, ctx, opts) {
     // effect factory that rejected, say). Collect them into the same report so
     // "the session survived" also says what it survived.
     if (ctx && Array.isArray(ctx.containedFailures)) {
-      for (const f of ctx.containedFailures) if (!flags.contained.includes(f)) flags.contained.push(f)
+      for (const f of ctx.containedFailures.slice(containedBase)) if (!flags.contained.includes(f)) flags.contained.push(f)
     }
     // A reused tool is still callable: its definition came from the first load,
     // which is why the caller keeps one shared registry rather than this map.

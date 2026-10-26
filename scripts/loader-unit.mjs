@@ -431,6 +431,25 @@ const { loadDshBundle } = await import('../src/dsh-loader.js')
   rmSync(tmp, { recursive: true, force: true })
 }
 
+// One scope serves every load for the life of a session, so a failure list that
+// only grows turns one real containment into a false report for everything after
+// it. Measured on a live session: after a single webServer containment, the next
+// 37 loads were reported as failing with that same reason, all of them innocent.
+{
+  const FIXROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures')
+  const scope = createDetachedScope({
+    tools: { register: () => ({ dispose () {} }) },
+    commands: { register: () => ({ dispose () {} }) },
+  })
+  const first = await loadDshBundle(path.join(FIXROOT, 'effect-reject'), scope, { cacheRoot: FIXROOT, registered: new Set(), settleMs: 250 })
+  const second = await loadDshBundle(path.join(FIXROOT, 'ctx-write'), scope, { cacheRoot: FIXROOT, registered: new Set(), settleMs: 0 })
+  check('the first load really did contain a failure',
+    /effect factory/.test(String(first.error)), JSON.stringify(first.error))
+  check('a contained failure does not leak into the next load on the same scope',
+    !second.error, JSON.stringify(second.error))
+  scope.dispose()
+}
+
 const roots = hostModulesRoots("C:/App/DeepSeek Harness.exe")
 check("finds the unpacked runtime the 0.2.1 layout ships",
   roots[0] === "C:\\App\\resources\\app\\dsh\\node_modules", JSON.stringify(roots))
