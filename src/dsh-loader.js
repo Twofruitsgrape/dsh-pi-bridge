@@ -18,6 +18,7 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
 import os from 'node:os'
+import { bundlePlugin } from './plugin-shape.js'
 
 /** Specifier families the running build supplies. */
 const HOST_PREFIXES = ['@deepseek-ai/', '@deepseek-harness/', 'cordis', 'schemastery', '@cordiverse/']
@@ -280,8 +281,14 @@ export async function loadDshBundle (dir, ctx, opts) {
     const tree = rewriteBundleTree(dir, opts.resolveSpec || hostEntry, { log })
     if (tree.mapped.length) log('rewrote ' + tree.files + ' file(s), host specifiers: ' + tree.mapped.join(', '))
     const mod = await import(pathToFileURL(entryFile).href)
-    const apply = (mod && mod.apply) || (mod.default && mod.default.apply)
-    if (typeof apply !== 'function') {
+    // What the module contributes, resolved without reading a property off a
+    // value that cannot carry it. `mod.default.apply` on a default-exported
+    // FUNCTION is Function.prototype.apply - a function, so every typeof guard
+    // passed, and calling it read as the bundle's own failure. Measured on
+    // npm:dsh-deja (export default apply) and npm:@yadsh/dsh-qa-surface in the
+    // same pi->DSH batch; both packages are correct.
+    const shape = bundlePlugin(mod)
+    if (!shape) {
       return { name: info.name, tools: [], commands: [], skills: 0, mapped: [], error: 'no DSH apply() exported from ' + path.basename(entryFile) + ': this bundle contributes configuration or a host bridge rather than a plugin module, so there is nothing to load at runtime' }
     }
     /**
@@ -312,8 +319,11 @@ export async function loadDshBundle (dir, ctx, opts) {
      * the report came back 'tools: none'. Caught offline by the reload test, which
      * is why the wider request is only the first attempt, not the only one.
      */
-    const declared = Array.isArray(mod.inject) ? mod.inject.slice() : []
-    if (!declared.length && mod.default && Array.isArray(mod.default.inject)) declared.push(...mod.default.inject)
+    const declared = shape.inject.slice()
+    if (!declared.length) {
+      if (Array.isArray(mod.inject)) declared.push(...mod.inject)
+      else if (mod.default && Array.isArray(mod.default.inject)) declared.push(...mod.default.inject)
+    }
     const wider = declared.slice()
     for (const need of ['tools', 'commands']) if (!wider.includes(need)) wider.push(need)
     const bundleConfig = resolveBundleConfig((mod.default && mod.default.config) || mod.Config || mod.config || {})
@@ -337,7 +347,7 @@ export async function loadDshBundle (dir, ctx, opts) {
         try {
           await ctx.inject(names, (inner) => {
             ran = true
-            return apply(observeScope(inner, tools, commands, skillCount, registered, alreadyPresent, conflicts, flags, serviceGet), bundleConfig)
+            return shape.construct(observeScope(inner, tools, commands, skillCount, registered, alreadyPresent, conflicts, flags, serviceGet), bundleConfig)
           })
         } catch (e) {
           if (ran) { bundleFailure = e; break }
@@ -410,7 +420,7 @@ export async function loadDshBundle (dir, ctx, opts) {
         }
       }
     } else {
-      await apply(scope, bundleConfig)
+      await shape.construct(scope, bundleConfig)
     }
 
     for (const t of tools) callable.set(t.name, t.def)

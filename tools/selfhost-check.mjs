@@ -8,10 +8,16 @@
  */
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+import os from 'node:os'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
-process.env.DSH_PI_BRIDGE_HOME = path.join(ROOT, '.tmp', '.selfhost-cache')
+// A per-run home, not a stable one. The stable path made the suite delete its
+// previous build tree (hundreds of files) before it could start, so a leftover
+// directory turned a green suite into an error about the deletion - and a
+// sandbox that guards bulk deletes into a hard failure. selftest.mjs already
+// uses this shape; matching it removes a setup step that tests nothing.
+process.env.DSH_PI_BRIDGE_HOME = path.join(os.tmpdir(), 'dsh-pi-bridge-selfhost-' + process.pid)
 
 const { loadForeign } = await import('../src/load.js')
 const { replayIntoPi } = await import('../src/replay-pi.js')
@@ -36,8 +42,20 @@ const got = acc.tools.map(t => t.name)
 const missing = want.filter(w => !got.includes(w))
 console.log(missing.length ? 'MISSING: ' + missing.join(',') : 'ALL 5 DSH TOOLS CROSSED INTO PI')
 // 每个桥过来的工具都应可调用并返回 pi content 形状
-for (const t of acc.tools) {
-  const res = await t.execute('id', {}, undefined, undefined, {})
-  const okRes = Array.isArray(res.content) && typeof res.content[0].text === 'string'
-  console.log('  ' + t.name + ' -> ' + (okRes ? 'ok' : 'BAD') + ': ' + String(res.content[0].text).replace(/\s+/g, ' ').slice(0, 60))
+const bad = []
+try {
+  for (const t of acc.tools) {
+    const res = await t.execute('id', {}, undefined, undefined, {})
+    const okRes = Array.isArray(res.content) && typeof res.content[0].text === 'string'
+    if (!okRes) bad.push(t.name)
+    console.log('  ' + t.name + ' -> ' + (okRes ? 'ok' : 'BAD') + ': ' + String(res.content[0].text).replace(/\s+/g, ' ').slice(0, 60))
+  }
+} finally {
+  // bridge_status starts a pi daemon. Its piped stdio keeps this process alive,
+  // so without this the suite printed every verdict and then hung - which reads
+  // as an infrastructure failure, not a result. Stop it before reporting.
+  const { stopDaemon } = await import('../src/proxy.js')
+  await stopDaemon().catch(() => false)
 }
+if (bad.length) console.log('BAD RESULTS: ' + bad.join(','))
+process.exit(missing.length || bad.length ? 1 : 0)

@@ -1,0 +1,8 @@
+{
+  "name": "shape-default-fn",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./index.js",
+  "keywords": ["dsh", "dsh-plugin"],
+  "description": "Fixture that contributes its plugin as `export default function`. This is npm:dsh-deja's shape, and the one the loader resolved to Function.prototype.apply."
+}

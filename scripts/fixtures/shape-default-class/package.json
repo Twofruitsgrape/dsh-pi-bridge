@@ -1,0 +1,8 @@
+{
+  "name": "shape-default-class",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./index.js",
+  "keywords": ["dsh", "dsh-plugin"],
+  "description": "Fixture that contributes its plugin as a class: cordis constructs it, so the loader must use `new`."
+}

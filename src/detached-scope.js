@@ -28,6 +28,7 @@
  *
  * @module src/detached-scope.js
  */
+import { describePlugin } from './plugin-shape.js'
 
 /**
  * @param {Record<string, any>} snapshot services read off the live scope during apply()
@@ -311,10 +312,13 @@ export function createDetachedScope (snapshot, opts) {
      * does not change what an awaiting caller receives.
      */
     plugin (p, config) {
-      const resolved = typeof p === 'function' ? p : (p && typeof p === 'object' ? p : null)
-      const applyFn = resolved === null ? undefined : (typeof resolved === 'function' ? resolved : resolved.apply)
-      if (typeof applyFn !== 'function') throw new Error('invalid plugin, expect function or object with an "apply" method, received ' + (resolved === null ? String(p) : typeof applyFn))
-      const declared = Array.isArray(resolved.inject) ? resolved.inject.slice() : []
+      // One resolver for every caller: dsh-loader reads a module namespace,
+      // this reads a value handed to ctx.plugin, and both must agree on what a
+      // class, an apply function and an object plugin are. Keeping two copies is
+      // how a class ends up constructed in one path and called in the other.
+      const shape = describePlugin(p, 'ctx.plugin')
+      if (!shape) throw new Error('invalid plugin, expect function or object with an "apply" method, received ' + String(p))
+      const declared = shape.inject
       if (declared.some((n) => services[n] === undefined)) return undefined
       const child = {}
       // A cordis plugin child resolves the parent's services through the
@@ -330,9 +334,8 @@ export function createDetachedScope (snapshot, opts) {
       // cordis instantiates a plugin given as a class (a Service subclass is the
       // normal shape); calling it as a function is what produced "Class constructor
       // X cannot be invoked without 'new'" for npm:dsh-browser-playwright-codex and
-      // npm:@wenaixi/dsh-ponytail. An apply-function plugin is still called.
-      const isClass = typeof resolved === 'function' && /^\s*class[\s{]/.test(Function.prototype.toString.call(resolved))
-      const out = isClass ? new resolved(child, config) : applyFn(child, config)
+      // npm:@wenaixi/dsh-ponytail. shape.construct keeps that distinction.
+      const out = shape.construct(child, config)
       if (out && typeof out.then === 'function') {
         const chained = out.then(() => ({ dispose () {} }), (e) => { throw e })
         chained.catch((e) => { log('detached plugin rejected: ' + String((e && e.message) || e).slice(0, 120)) })

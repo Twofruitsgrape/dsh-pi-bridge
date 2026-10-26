@@ -17,8 +17,12 @@ import os from "node:os"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, "..")
-const TMP = path.join(ROOT, ".tmp", "dsh-proxy-e2e")
-await rm(TMP, { recursive: true, force: true })
+// Per-run and outside the repository: this suite installs a real package tree
+// (thousands of files), and a stable path meant every run began by deleting the
+// previous one. That deletion is what a leftover directory turned into a
+// failure, and what a sandbox guarding bulk deletes refuses outright - a setup
+// step that tests nothing about the bridge. A fresh directory needs no cleanup.
+const TMP = path.join(os.tmpdir(), "dsh-pi-bridge-proxy-e2e-" + process.pid)
 await mkdir(TMP, { recursive: true })
 process.env.DSH_PI_BRIDGE_HOME = TMP
 process.env.DSH_PI_BRIDGE_DAEMON_PORT = "43157"

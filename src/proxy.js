@@ -128,14 +128,39 @@ export function isStaleDaemon (reply, ourVersion = OUR_VERSION) {
 }
 
 /** Ask a running daemon to exit so this build can start in its place. */
-async function retireDaemon (log, h) {
-  log('restarting the pi daemon: it runs bridge ' + (h.bridgeVersion || 'unversioned') + ', this is ' + OUR_VERSION)
+async function retireDaemon (log, h) {  log('restarting the pi daemon: it runs bridge ' + (h.bridgeVersion || 'unversioned') + ', this is ' + OUR_VERSION)
   try { await request('GET', '/shutdown', null, 8000) } catch { /* already gone */ }
   for (let i = 0; i < 24; i++) {
     await new Promise((r) => setTimeout(r, 500))
     // Port free again: the old process is gone.
     try { await health(1500) } catch { return }
   }
+}
+
+/**
+ * Stop the daemon and let this process exit.
+ *
+ * A status check has a side effect nobody asked for: ensureDaemon starts a pi
+ * daemon, and the spawned child's piped stdio keeps the parent's event loop
+ * alive. The published self-host check calls every tool the bridge exports,
+ * bridge_status included, so it finished its assertions and then never exited -
+ * the suite read as a hang rather than a verdict. Asking the daemon to go and
+ * releasing the pipes is what makes shutdown observable.
+ *
+ * @param {number} [ms] how long to wait for /shutdown to be accepted
+ * @returns {Promise<boolean>} true when the port stopped answering
+ */
+export async function stopDaemon (ms = 8000) {
+  try { await request('GET', '/shutdown', null, ms) } catch { /* nothing listening */ }
+  if (child) {
+    try { child.stdout.destroy() } catch { /* already closed */ }
+    try { child.stderr.destroy() } catch { /* already closed */ }
+  }
+  for (let i = 0; i < 20; i++) {
+    try { await health(800) } catch { child = null; return true }
+    await new Promise((r) => setTimeout(r, 250))
+  }
+  return false
 }
 
 export async function ensureDaemon (options) {

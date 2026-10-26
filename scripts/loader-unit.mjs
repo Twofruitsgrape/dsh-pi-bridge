@@ -224,6 +224,50 @@ const { loadDshBundle } = await import('../src/dsh-loader.js')
   scope.dispose()
 }
 
+// Three module shapes carry a plugin, and only one of them used to work. The
+// trap is specific: on a default-exported FUNCTION, `.apply` is
+// Function.prototype.apply. It is a function, so a typeof guard passes, and
+// calling it raises "Function.prototype.apply was called on undefined, which is
+// undefined and not a function" - which the loader then reported as the bundle's
+// own apply() failing. Measured on npm:dsh-deja (export default apply) and
+// npm:@yadsh/dsh-qa-surface in the same pi->DSH batch; both packages are fine.
+{
+  const { bundlePlugin } = await import("../src/plugin-shape.js")
+  let called = 0
+  const fnOnly = { default: function apply () { called++ } }
+  const resolvedFn = bundlePlugin(fnOnly)
+  check("a default-exported function is resolved as the plugin itself",
+    !!resolvedFn && resolvedFn.kind === "apply" && resolvedFn.source === "export default",
+    JSON.stringify(resolvedFn && { kind: resolvedFn.kind, source: resolvedFn.source }))
+  resolvedFn && resolvedFn.construct({}, {})
+  check("and the call reaches the module's own function, not Function.prototype.apply",
+    called === 1, "times the module function ran: " + called)
+
+  const FIXROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures')
+  const shapes = [
+    ["shape-default-fn", "shape_default_fn_tool", "a default-exported apply function"],
+    ["shape-default-class", "shape_default_class_tool", "a default-exported class (constructed)"],
+    ["shape-object-default", "shape_object_default_tool", "a default-exported object plugin"],
+  ]
+  for (const [dir, tool, label] of shapes) {
+    const landed = []
+    const scope = createDetachedScope({
+      tools: { register: (d) => { landed.push(d.name); return { dispose () {} } } },
+      commands: { register: () => ({ dispose () {} }) },
+    })
+    const fixture = path.join(FIXROOT, dir)
+    let r = null
+    try {
+      r = await loadDshBundle(fixture, scope, { cacheRoot: FIXROOT, registered: new Set() })
+    } catch (e) {
+      r = { error: "threw: " + String((e && e.message) || e) }
+    }
+    check(label + " loads and registers its tool",
+      !!r && !r.error && landed.includes(tool), "error=" + JSON.stringify(r && r.error) + " landed=" + JSON.stringify(landed))
+    scope.dispose()
+  }
+}
+
 const roots = hostModulesRoots("C:/App/DeepSeek Harness.exe")
 check("finds the unpacked runtime the 0.2.1 layout ships",
   roots[0] === "C:\\App\\resources\\app\\dsh\\node_modules", JSON.stringify(roots))
