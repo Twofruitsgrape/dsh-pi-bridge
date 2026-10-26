@@ -62,6 +62,23 @@ for (const [src, label] of shapes) {
   check(label + " rewritten", out.mapped.length === 1 && out.code.includes("file:///C:/host"),
     label + " -> " + out.code.slice(0, 90) + " mapped=" + out.mapped.length)
 }
+// Whitespace after `from` is optional, and a minified bundle writes none:
+// npm:dsh-context 0.77.0 starts its single line with
+// `import{deriveEventMessage as n}from"@deepseek-ai/dsh-session"`. The rewriter
+// required `from\s+`, so it rewrote nothing in that file and the load died with
+// "Cannot find package '@deepseek-ai/dsh-session'" - a host module the build
+// ships. A fix that only widens `from` must not lose the other two shapes.
+const minified = [
+  ["import{x}from" + JSON.stringify(SPEC), "minified named import (no space after from)"],
+  ["import" + JSON.stringify(SPEC), "minified side-effect import (no space after import)"],
+  ["export{x}from" + JSON.stringify(SPEC), "minified re-export (no space after from)"],
+]
+for (const [src, label] of minified) {
+  const out = rewriteHostSpecifiers(src, fakeSpec)
+  check(label + " rewritten", out.mapped.length === 1 && out.code.includes("file:///C:/host"),
+    label + " -> " + out.code.slice(0, 90) + " mapped=" + out.mapped.length)
+}
+
 const once = rewriteHostSpecifiers("import { x } from " + JSON.stringify(SPEC), fakeSpec)
 check("a named import is rewritten exactly once",
   once.code.split("file:///C:/host").length - 1 === 1 && once.mapped.length === 1, once.code)
@@ -395,6 +412,23 @@ const { loadDshBundle } = await import('../src/dsh-loader.js')
     !!r && !r.error && landed.includes('ctx_write_tool'),
     "error=" + JSON.stringify(r && r.error) + " landed=" + JSON.stringify(landed))
   scope.dispose()
+}
+
+// The tree walker has its own prefilter, and it needed the same tolerance: a
+// minified file was rejected before the rewriter ever saw it, so `mapped` stayed
+// empty and the load blamed a host package that was present.
+{
+  const tmp = path.join(os.tmpdir(), 'dsh-pi-bridge-minified-' + process.pid)
+  mkdirSync(tmp, { recursive: true })
+  const file = path.join(tmp, 'index.js')
+  writeFileSync(file, 'import{z as t}from"@deepseek-ai/schemastery";export const apply=()=>t\n')
+  const host = () => 'C:/host/schemastery/index.js'
+  const r = rewriteBundleTree(tmp, host, { cacheRoot: os.tmpdir() })
+  const after = readFileSync(file, 'utf8')
+  check('a minified file is not skipped by the prefilter',
+    /file:\/\/\/C:\/host/.test(after) && r.mapped.includes('@deepseek-ai/schemastery'),
+    "code=" + after.slice(0, 90) + " mapped=" + JSON.stringify(r.mapped))
+  rmSync(tmp, { recursive: true, force: true })
 }
 
 const roots = hostModulesRoots("C:/App/DeepSeek Harness.exe")

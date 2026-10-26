@@ -77,7 +77,14 @@ export function rewriteHostSpecifiers (source, resolveSpec = hostEntry, options 
   // a package the product does not ship, when the product ships it and I had just
   // failed to rewrite the one line that asked for it. (@furongjun1999/dsh-memory,
   // measured: the specifier resolves fine from the build's own node_modules.)
-  let code = source.replace(/(\bfrom\s+|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"\n]+)\2/g, (whole, head, quote, spec) => {
+  //
+  // Whitespace after `from` and `import` is optional in the grammar, and a minified
+  // bundle writes none: npm:dsh-context 0.77.0 ships one long line beginning
+  // `import{deriveEventMessage as n}from"@deepseek-ai/dsh-session"`, which required
+  // `from\s+` and therefore rewrote NOTHING - that load died with "Cannot find
+  // package '@deepseek-ai/dsh-session'" for a host module the build ships. \s* is
+  // what the grammar allows; \b keeps an identifier ending in "from" out.
+  let code = source.replace(/(\bfrom\s*|\bimport\s*\(\s*|\bimport\s*)(['"])([^'"\n]+)\2/g, (whole, head, quote, spec) => {
     // A plain builtin ('fs/promises', 'path') must also stay untouched: hostEntry
     // resolves a builtin to its own bare name and toUrl would then publish a fake
     // "file://path" import URL. Measured in the hot-100 DSH batch, chunk 1: two
@@ -210,7 +217,12 @@ export function rewriteBundleTree (dir, resolveSpec = hostEntry, opts) {
       let source = ''
       try { source = readFileSync(full, 'utf8') } catch { continue }
       files++
-      if (!/from\s+['"]|import\s*\(|^\s*import\s+['"]/m.test(source)) continue
+      // The same tolerance the rewriter needs, or a minified file is dropped
+      // before it is ever looked at: npm:dsh-context ships one line beginning
+      // `import{...}from"@deepseek-ai/dsh-session"`, which this pre-filter used to
+      // reject - so the file was counted and skipped, mapped stayed empty, and the
+      // reported cause was a missing host package that was there all along.
+      if (!/\bfrom\s*['"]|\bimport\s*\(\s*|\bimport\s*['"]/m.test(source)) continue
       const { code, mapped: hits } = rewriteHostSpecifiers(source, withPeerFallback, opts)
       if (!hits.length) continue
       for (const h of hits) mapped.add(h.specifier)
