@@ -1,6 +1,6 @@
 // Unit checks for the runtime DSH bundle loader: specifier classification and
 // host rewriting. They need no host, so they can gate the publish path.
-import { isHostSpecifier, rewriteHostSpecifiers, rewriteBundleTree, hostModulesRoots, resolveBundleConfig } from "../src/dsh-loader.js"
+import { isHostSpecifier, rewriteHostSpecifiers, rewriteBundleTree, hostModulesRoots, resolveBundleConfig, hostEntry } from "../src/dsh-loader.js"
 import { toToolSchema } from "../src/schema.js"
 import { fileURLToPath } from "node:url"
 import path from "node:path"
@@ -447,6 +447,44 @@ const { loadDshBundle } = await import('../src/dsh-loader.js')
     /effect factory/.test(String(first.error)), JSON.stringify(first.error))
   check('a contained failure does not leak into the next load on the same scope',
     !second.error, JSON.stringify(second.error))
+  scope.dispose()
+}
+
+// require.resolve reads the "require" condition, so an ESM-only host package -
+// exports: { ".": { import: "./dist/index.js" } } - reports
+// ERR_PACKAGE_PATH_NOT_EXPORTED even though it is installed. Measured on the
+// build's own @earendil-works/pi-ai: four bundles in the 200-sample batch
+// bare-imported it and every one was reported as "Cannot find package", blaming
+// the bundle for the resolver.
+{
+  const root = path.join(os.tmpdir(), 'dsh-pi-bridge-esmonly-' + process.pid)
+  const pkgDir = path.join(root, '@x', 'esm-only')
+  mkdirSync(path.join(pkgDir, 'dist'), { recursive: true })
+  writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({
+    name: '@x/esm-only', version: '1.0.0', type: 'module',
+    exports: { '.': { types: './dist/index.d.ts', import: './dist/index.js' }, './sub': { import: './dist/sub.js' } },
+  }))
+  writeFileSync(path.join(pkgDir, 'dist', 'index.js'), 'export const ok = true\n')
+  writeFileSync(path.join(pkgDir, 'dist', 'sub.js'), 'export const ok = true\n')
+  const main = hostEntry('@x/esm-only', [root])
+  check('an ESM-only host package resolves through its import condition',
+    !!main && main.replace(/\\/g, '/').endsWith('@x/esm-only/dist/index.js'), String(main))
+  const sub = hostEntry('@x/esm-only/sub', [root])
+  check('a subpath export resolves too',
+    !!sub && sub.replace(/\\/g, '/').endsWith('@x/esm-only/dist/sub.js'), String(sub))
+  rmSync(root, { recursive: true, force: true })
+}
+
+// A plugin composed from inside apply() gets a child scope; it must carry the same
+// surface an inject child does. npm:dsh-tool-vision's composed plugin called
+// ctx.get("webServer") and died with "inner.get is not a function" - the inject
+// child had get, this one did not.
+{
+  const scope = createDetachedScope({ tools: { register: () => ({ dispose () {} }) }, webServer: { ok: true } })
+  let seen = null
+  scope.plugin((child) => { seen = { get: typeof child.get, webServer: child.get && child.get('webServer') } })
+  check('a plugin child scope carries ctx.get like an inject child',
+    !!seen && seen.get === 'function' && !!seen.webServer, JSON.stringify(seen))
   scope.dispose()
 }
 

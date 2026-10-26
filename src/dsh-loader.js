@@ -51,9 +51,74 @@ export function hostModulesRoots (execPath = process.execPath) {
 /** Resolve one host specifier to a real module file inside the running build. */
 export function hostEntry (specifier, roots = hostModulesRoots()) {
   for (const r of roots) {
-    try { return createRequire(path.join(r, 'noop.js')).resolve(specifier) } catch { /* next root */ }
+    try { return createRequire(path.join(r, 'noop.js')).resolve(specifier) } catch { /* next */ }
+    // An ESM-only package declares only the "import" condition, and require.resolve
+    // reads the "require" one - so it reports ERR_PACKAGE_PATH_NOT_EXPORTED for a
+    // package that is right there. Measured on the build's own @earendil-works/pi-ai,
+    // which four bundles in the 200-sample batch bare-import: every one of them was
+    // reported as "Cannot find package", which blames the bundle for our resolver.
+    try {
+      const viaExports = resolveExportsOnly(specifier, r)
+      if (viaExports) return viaExports
+    } catch { /* next root */ }
   }
   return null
+}
+
+/** Pick the branch of a conditional exports value that an import would take. */
+function pickCondition (value) {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    for (const v of value) { const r = pickCondition(v); if (r) return r }
+    return null
+  }
+  if (value && typeof value === 'object') {
+    for (const k of ['import', 'node', 'module', 'default']) {
+      if (k in value) { const r = pickCondition(value[k]); if (r) return r }
+    }
+  }
+  return null
+}
+
+/** The target an exports map gives a subpath, including one `*` wildcard. */
+function exportTarget (exports, subpath) {
+  if (typeof exports === 'string' || Array.isArray(exports)) {
+    return subpath === '.' ? pickCondition(exports) : null
+  }
+  if (!exports || typeof exports !== 'object') return null
+  if (subpath in exports) return pickCondition(exports[subpath])
+  for (const [key, value] of Object.entries(exports)) {
+    if (!key.includes('*')) continue
+    const star = key.indexOf('*')
+    const pre = key.slice(0, star)
+    const post = key.slice(star + 1)
+    if (subpath.startsWith(pre) && subpath.endsWith(post)) {
+      const middle = subpath.slice(pre.length, subpath.length - post.length)
+      const target = pickCondition(value)
+      if (target) return target.replace('*', middle)
+    }
+  }
+  // A conditions-only map with no subpath keys describes "." itself.
+  if (!Object.keys(exports).some((k) => k.startsWith('.'))) {
+    return subpath === '.' ? pickCondition(exports) : null
+  }
+  return null
+}
+
+/** Resolve a specifier through its exports map when require.resolve declines. */
+function resolveExportsOnly (specifier, root) {
+  const seg = specifier.split('/')
+  const pkgName = seg[0].startsWith('@') ? seg.slice(0, 2).join('/') : seg[0]
+  const rest = seg.slice(pkgName.startsWith('@') ? 2 : 1).join('/')
+  const subpath = rest ? './' + rest : '.'
+  const pkgDir = path.join(root, pkgName)
+  const pkgFile = path.join(pkgDir, 'package.json')
+  if (!existsSync(pkgFile)) return null
+  const pkg = JSON.parse(readFileSync(pkgFile, 'utf8'))
+  const target = exportTarget(pkg.exports, subpath) || (subpath === '.' ? pkg.module || pkg.main : null)
+  if (!target) return null
+  const file = path.resolve(pkgDir, target)
+  return existsSync(file) ? file : null
 }
 
 function toUrl (file) {

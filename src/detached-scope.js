@@ -353,7 +353,7 @@ export function createDetachedScope (snapshot, opts) {
       // c.tools.register - "Cannot read properties of undefined"). The
       // declared names still gate whether the helper runs at all.
       for (const [n, v] of Object.entries(services)) child[n] = v
-      for (const k of ['effect', 'on', 'once', 'emit', 'inject', 'provide', 'plugin', 'missing', 'reflect']) child[k] = base[k]
+      for (const k of ['effect', 'on', 'once', 'emit', 'inject', 'provide', 'plugin', 'missing', 'reflect', 'get']) child[k] = base[k]
       for (const k of TIMER_KEYS) child[k] = base[k]
       children.push(child)
       // cordis instantiates a plugin given as a class (a Service subclass is the
