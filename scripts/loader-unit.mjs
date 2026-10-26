@@ -4,6 +4,7 @@ import { isHostSpecifier, rewriteHostSpecifiers, rewriteBundleTree, hostModulesR
 import { toToolSchema } from "../src/schema.js"
 import { fileURLToPath } from "node:url"
 import path from "node:path"
+import os from "node:os"
 import { mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs"
 
 let fails = 0
@@ -341,6 +342,58 @@ const { loadDshBundle } = await import('../src/dsh-loader.js')
     JSON.stringify(r && r.error))
   check('the tool the bundle registered is still reported',
     landed.includes('effect_reject_tool'), JSON.stringify(landed))
+  scope.dispose()
+}
+
+// The entry directory is not always a plain one. npm:@ljwei-stak/dsh-mv-cli
+// publishes main "./.dsh-plugin/index.mjs", and the tree walker skipped every
+// dot-directory, so that entry's bare '@deepseek-ai/schemastery' import was never
+// rewritten and the load died with "Cannot find package" for a package the build
+// ships. Walking the directory an entry lives in is the fix; other dot-dirs stay
+// skipped.
+{
+  const tmp = path.join(os.tmpdir(), 'dsh-pi-bridge-dotdir-' + process.pid)
+  const entryDir = path.join(tmp, '.dsh-plugin')
+  mkdirSync(entryDir, { recursive: true })
+  const entry = path.join(entryDir, 'index.js')
+  writeFileSync(entry, "import z from '@deepseek-ai/schemastery'\nexport const apply = () => z\n")
+  const { rewriteBundleTree } = await import('../src/dsh-loader.js')
+  const host = () => 'C:/host/schemastery/index.js'
+  const withoutEntry = rewriteBundleTree(tmp, host, { cacheRoot: os.tmpdir() })
+  const before = readFileSync(entry, 'utf8')
+  check('a dot directory is still skipped when no entry lives in it',
+    /@deepseek-ai\/schemastery/.test(before) && !/file:\/\//.test(before), before.slice(0, 100))
+  const withEntry = rewriteBundleTree(tmp, host, { cacheRoot: os.tmpdir(), entry })
+  const after = readFileSync(entry, 'utf8')
+  check('the directory an entry lives in is walked even when its name starts with a dot',
+    /file:\/\/\/C:\/host\/schemastery/.test(after), after.slice(0, 120))
+  check('and the walk reports what it mapped',
+    withEntry.mapped.includes('@deepseek-ai/schemastery') || withoutEntry.mapped.includes('@deepseek-ai/schemastery'),
+    JSON.stringify({ withEntry: withEntry.mapped, withoutEntry: withoutEntry.mapped }))
+  rmSync(tmp, { recursive: true, force: true })
+}
+
+// A bundle's own bookkeeping must not be refused. npm:dsh-remote-mobile sets
+// ctx.__dsh_rm_index_mounted__ = true in apply(); a set trap that always returned
+// false raised "'set' on proxy: trap returned falsish" in strict mode and the
+// whole bundle failed over a private flag.
+{
+  const FIXROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures')
+  const landed = []
+  const scope = createDetachedScope({
+    tools: { register: (d) => { landed.push(d.name); return { dispose () {} } } },
+    commands: { register: () => ({ dispose () {} }) },
+  })
+  const fixture = path.join(FIXROOT, 'ctx-write')
+  let r = null
+  try {
+    r = await loadDshBundle(fixture, scope, { cacheRoot: FIXROOT, registered: new Set() })
+  } catch (e) {
+    r = { error: 'threw: ' + String((e && e.message) || e) }
+  }
+  check('a bundle can keep a private flag on ctx without failing',
+    !!r && !r.error && landed.includes('ctx_write_tool'),
+    "error=" + JSON.stringify(r && r.error) + " landed=" + JSON.stringify(landed))
   scope.dispose()
 }
 

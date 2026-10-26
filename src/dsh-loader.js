@@ -153,6 +153,17 @@ export function rewriteBundleTree (dir, resolveSpec = hostEntry, opts) {
   const mapped = new Set()
   let files = 0
   /**
+   * A dot-directory is normally noise (.git, .cache), but not always: measured on
+   * npm:@ljwei-stak/dsh-mv-cli, whose package.json main is
+   * "./.dsh-plugin/index.mjs". Skipping it left that entry's bare
+   * '@deepseek-ai/schemastery' import untouched and the load died with
+   * "Cannot find package '@deepseek-ai/schemastery'" - a host package the build
+   * ships. The directory an entry actually lives in must be walked whatever it is
+   * called; other dot-directories stay skipped.
+   */
+  const entryDir = opts && opts.entry ? path.resolve(opts.entry) : null
+  const holdsEntry = (dir) => !!entryDir && (entryDir === dir || entryDir.startsWith(dir + path.sep))
+  /**
    * A third-party specifier gets one fallback the host families never needed:
    * the bundle's own tree first, then the running build. Measured live:
    * dsh-mcp-connector declares zod as a peer dependency - the cache install
@@ -191,7 +202,7 @@ export function rewriteBundleTree (dir, resolveSpec = hostEntry, opts) {
         // withPeerFallback had exactly what they asked for. Dot-directories
         // stay skipped. Idempotent: already-rewritten specifiers are file:
         // URLs, which rewriteHostSpecifiers leaves alone.
-        if (e.name.startsWith('.')) continue
+        if (e.name.startsWith('.') && !holdsEntry(full)) continue
         walk(full, depth + 1)
         continue
       }
@@ -279,7 +290,7 @@ export async function loadDshBundle (dir, ctx, opts) {
   const serviceGet = serviceGetter(ctx)
   const scope = observeScope(ctx, tools, commands, skillCount, registered, alreadyPresent, conflicts, flags, serviceGet)
   try {
-    const tree = rewriteBundleTree(dir, opts.resolveSpec || hostEntry, { log })
+    const tree = rewriteBundleTree(dir, opts.resolveSpec || hostEntry, { log, entry: entryFile })
     if (tree.mapped.length) log('rewrote ' + tree.files + ' file(s), host specifiers: ' + tree.mapped.join(', '))
     const mod = await import(pathToFileURL(entryFile).href)
     // What the module contributes, resolved without reading a property off a
@@ -529,8 +540,21 @@ function observeScope (ctx, tools, commands, skillCounter, registered, alreadyPr
       },
     })
   }
+  /**
+   * Where a bundle's own bookkeeping goes.
+   *
+   * Refusing every write was wrong in a way that looked principled: measured on
+   * npm:dsh-remote-mobile, whose apply() sets
+   * `ctx.__dsh_rm_index_mounted__ = true` as an idempotency flag, the trap
+   * returned false, and in strict mode (every ESM bundle) that raises
+   * "'set' on proxy: trap returned falsish" - the whole bundle failed over a
+   * private flag the host never needed to see. host-owned properties are still
+   * refused: writing those would corrupt a real service.
+   */
+  const shadow = Object.create(null)
   return new Proxy(ctx, {
     get (target, prop) {
+      if (typeof prop === 'string' && prop in shadow) return shadow[prop]
       // A bundle registers from inside its own ctx.inject callback all the
       // time - dsh-super-code and dsh-thinking-levels both do - and the host hands
       // that callback a scope of its own, not the one this loader handed to apply().
@@ -583,8 +607,11 @@ function observeScope (ctx, tools, commands, skillCounter, registered, alreadyPr
       const value = target[prop]
       return typeof value === 'function' ? value.bind(target) : value
     },
-    // Never write through to the host scope.
-    set () { return false },
+    // A bundle's private property lands in the shadow, never on the host scope.
+    set (target, prop, value) {
+      if (typeof prop === 'string' && !(prop in target)) { shadow[prop] = value; return true }
+      return false
+    },
   })
 }
 

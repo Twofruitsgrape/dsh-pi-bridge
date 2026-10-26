@@ -1,0 +1,8 @@
+{
+  "name": "ctx-write",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./index.js",
+  "keywords": ["dsh", "dsh-plugin"],
+  "description": "Fixture that stores an idempotency flag on ctx, the way npm:dsh-remote-mobile does."
+}
