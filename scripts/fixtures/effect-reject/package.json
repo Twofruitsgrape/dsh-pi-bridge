@@ -1,0 +1,8 @@
+{
+  "name": "effect-reject",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./index.js",
+  "keywords": ["dsh", "dsh-plugin"],
+  "description": "Fixture whose async ctx.effect() factory rejects: the exact shape that took a live DSH session down via an unowned promise."
+}

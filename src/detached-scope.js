@@ -56,13 +56,38 @@ export function createDetachedScope (snapshot, opts) {
   const cleanups = []
   /** Every scope handed out, so dispose() can tear down deferred children too. */
   const children = []
+  /**
+   * Failures that WOULD have killed the host, kept for the load report.
+   *
+   * Measured on npm:@michengai/dsh-automation 1.0.10: its whole activation runs
+   * inside ctx.effect(async () => { ... connection.rpc.handle(...) ... }). The
+   * host's connection implementation throws "cannot get property webServer
+   * without inject" inside that async factory, and this shim called the factory
+   * and dropped the promise it returned - so nothing awaited it, the rejection
+   * was unowned, and node terminated the DSH process with "dsh: fatal load
+   * failure". The stack named connection.rpc, which is where it threw, not why
+   * it escaped.
+   */
+  const failures = []
 
   const effectShim = (factory) => {
     try {
-      const dispose = typeof factory === "function"
+      const out = typeof factory === "function"
         ? factory((fn) => { if (typeof fn === "function") cleanups.push(fn) })
         : undefined
-      if (typeof dispose === "function") cleanups.push(dispose)
+      if (typeof out === "function") cleanups.push(out)
+      else if (out && typeof out.then === "function") {
+        // An async effect factory is not the documented shape, but a real bundle
+        // uses it, and its rejection is what took the host down (see failures
+        // above). Keep the cleanup if it resolves to one, and make the rejection
+        // owned - attributed to the bundle, not to the process.
+        out.then(
+          (value) => { if (typeof value === "function") cleanups.push(value) },
+          (e) => {
+            failures.push({ service: 'effect', call: 'effect factory (async)', error: String((e && e.message) || e).slice(0, 200) })
+          },
+        )
+      }
     } catch (e) {
       // A bundle effect body can fail for its own reasons (a service it did not
       // declare, say). Recording that beats letting it abort a load that had
@@ -346,6 +371,10 @@ export function createDetachedScope (snapshot, opts) {
   }
   for (const [k, v] of Object.entries(services)) base[k] = v
   Object.assign(base, timerHelpers)
+  // The loader reads this to report what was contained instead of what killed
+  // the session. A plain array property, so the read works through observeScope's
+  // get-only proxy without going through a function.
+  base.containedFailures = failures
 
   const scope = new Proxy(base, {
     get (target, prop) {

@@ -19,6 +19,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
 import os from 'node:os'
 import { bundlePlugin } from './plugin-shape.js'
+import { guardConnection } from './service-guard.js'
 
 /** Specifier families the running build supplies. */
 const HOST_PREFIXES = ['@deepseek-ai/', '@deepseek-harness/', 'cordis', 'schemastery', '@cordiverse/']
@@ -264,7 +265,7 @@ export async function loadDshBundle (dir, ctx, opts) {
   const commands = []
   /** Skill providers the bundle registers: real capability, just not callable. */
   /** Whether the bundle used ctx.inject at all: registrations may be pending. */
-  const flags = { deferred: false }
+  const flags = { deferred: false, contained: [] }
   const skillCount = { count: 0 }
   /** Names the host refused because they already exist; reported, not fatal. */
   const alreadyPresent = []
@@ -424,11 +425,32 @@ export async function loadDshBundle (dir, ctx, opts) {
     }
 
     for (const t of tools) callable.set(t.name, t.def)
+    // A bundle's registrations and its service calls both continue after apply()
+    // resolves. Measured on npm:@michengai/dsh-automation: the load answered
+    // ok:true in 540ms and the session died right after, because the failing
+    // connection.rpc.handle ran in the bundle's own continuation. Reporting the
+    // load before those continuations have run means reporting the wrong thing -
+    // so give them a bounded moment to land, then read what the guard captured.
+    const settleMs = Number.isFinite(opts && opts.settleMs) ? opts.settleMs : 250
+    if (settleMs > 0) await new Promise((r) => setTimeout(r, settleMs))
+    // A detached scope carries the failures its own shims contained (an async
+    // effect factory that rejected, say). Collect them into the same report so
+    // "the session survived" also says what it survived.
+    if (ctx && Array.isArray(ctx.containedFailures)) {
+      for (const f of ctx.containedFailures) if (!flags.contained.includes(f)) flags.contained.push(f)
+    }
     // A reused tool is still callable: its definition came from the first load,
     // which is why the caller keeps one shared registry rather than this map.
+    const contained = flags.contained
     return {
       name: info.name,
       skills: skillCount.count,
+      // Contained is not the same as succeeded. The bundle made a call that
+      // would have ended the session, so the load carries the reason instead of
+      // reporting a clean success that hides it.
+      ...(contained.length
+        ? { contained, error: 'its own ' + contained[0].call + ' failed and was contained: ' + contained[0].error }
+        : {}),
       // Strip the definition before returning it across a boundary.
       tools: tools
         .filter((t) => !alreadyPresent.includes(t.name))
@@ -525,8 +547,25 @@ function observeScope (ctx, tools, commands, skillCounter, registered, alreadyPr
       }
       if (prop === 'get') {
         const own = target.get
-        if (typeof own === 'function') return own.bind(target)
-        return serviceGet
+        const read = typeof own === 'function' ? own.bind(target) : serviceGet
+        if (typeof read !== 'function') return read
+        // get('connection') is the other way a bundle reaches the same service,
+        // and a guard on the property alone would leave that door open.
+        return (name) => {
+          const value = read(name)
+          return name === 'connection' && value ? guardConnection(value, flags.contained) : value
+        }
+      }
+      // The one service whose misuse takes the whole session with it: the
+      // bundle calls connection.rpc.handle(), the HOST's own implementation
+      // throws on a fiber it never injected webServer into, and because that
+      // happens on the host's registration path the process exits. Measured on
+      // npm:@michengai/dsh-automation 1.0.10. Guarding the value the bundle is
+      // handed is what turns "host is gone" into "this bundle's call failed".
+      if (prop === 'connection') {
+        let real
+        try { real = target.connection } catch { return undefined }
+        return real ? guardConnection(real, flags.contained) : real
       }
       if (prop === 'tools' && target.tools) return recording('tools', tools)
       if (prop === 'commands' && target.commands) return recording('commands', commands)

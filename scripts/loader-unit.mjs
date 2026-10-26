@@ -268,6 +268,82 @@ const { loadDshBundle } = await import('../src/dsh-loader.js')
   }
 }
 
+// The one failure that takes the host down with it. npm:@michengai/dsh-automation
+// reads ctx.connection and calls .rpc.handle(): the HOST's implementation reads
+// webServer off a fiber that never injected it, the throw lands on the host's own
+// registration path inside the bundle's continuation, and because apply() had
+// already resolved nothing of ours was on the stack - the host printed
+// "dsh: fatal load failure" and exited. The guard wraps the one service whose
+// misuse does that, so the failure stays attributed and the session lives.
+{
+  const FIXROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures')
+  const uncaught = []
+  const handler = (e) => { uncaught.push(String((e && e.message) || e)) }
+  process.on('uncaughtException', handler)
+  const landed = []
+  const scope = createDetachedScope({
+    tools: { register: (d) => { landed.push(d.name); return { dispose () {} } } },
+    commands: { register: () => ({ dispose () {} }) },
+    connection: {
+      rpc: {
+        handle () { throw new Error('cannot get property "webServer" without inject') },
+      },
+    },
+  })
+  const fixture = path.join(FIXROOT, 'connection-throw')
+  let r = null
+  try {
+    r = await loadDshBundle(fixture, scope, { cacheRoot: FIXROOT, registered: new Set(), settleMs: 250 })
+  } catch (e) {
+    r = { error: 'threw: ' + String((e && e.message) || e) }
+  }
+  await new Promise((res) => setTimeout(res, 300))
+  process.off('uncaughtException', handler)
+  check('a deferred connection call that throws never reaches the process',
+    uncaught.length === 0, JSON.stringify(uncaught))
+  check('the load names the contained call and its reason',
+    !!r && /connection\.rpc\.handle/.test(String(r.error)) && /webServer/.test(String(r.error)),
+    JSON.stringify(r && r.error))
+  check('the tool registered before the contained failure is still reported',
+    landed.includes('connection_throw_tool'), JSON.stringify(landed))
+  scope.dispose()
+}
+
+// The real cause behind the fatal load failure, with no host involved: a bundle
+// runs its activation inside ctx.effect(async () => { ... }), the effect shim
+// calls the factory and drops the promise it returns, and the rejection is
+// unowned - which terminates the process. npm:@michengai/dsh-automation hit
+// exactly this; its stack named connection.rpc, which is where it threw, not why
+// it escaped.
+{
+  const FIXROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures')
+  const unhandled = []
+  const onUnhandled = (e) => { unhandled.push(String((e && e.message) || e)) }
+  process.on('unhandledRejection', onUnhandled)
+  const landed = []
+  const scope = createDetachedScope({
+    tools: { register: (d) => { landed.push(d.name); return { dispose () {} } } },
+    commands: { register: () => ({ dispose () {} }) },
+  })
+  const fixture = path.join(FIXROOT, 'effect-reject')
+  let r = null
+  try {
+    r = await loadDshBundle(fixture, scope, { cacheRoot: FIXROOT, registered: new Set(), settleMs: 250 })
+  } catch (e) {
+    r = { error: 'threw: ' + String((e && e.message) || e) }
+  }
+  await new Promise((res) => setTimeout(res, 300))
+  process.off('unhandledRejection', onUnhandled)
+  check('a rejecting async effect factory does not escape as an unhandled rejection',
+    unhandled.length === 0, JSON.stringify(unhandled))
+  check('the load reports the contained effect failure with its reason',
+    !!r && /effect factory/.test(String(r.error)) && /EFFECT FACTORY REJECTED/.test(String(r.error)),
+    JSON.stringify(r && r.error))
+  check('the tool the bundle registered is still reported',
+    landed.includes('effect_reject_tool'), JSON.stringify(landed))
+  scope.dispose()
+}
+
 const roots = hostModulesRoots("C:/App/DeepSeek Harness.exe")
 check("finds the unpacked runtime the 0.2.1 layout ships",
   roots[0] === "C:\\App\\resources\\app\\dsh\\node_modules", JSON.stringify(roots))

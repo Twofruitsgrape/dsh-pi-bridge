@@ -1,0 +1,8 @@
+{
+  "name": "connection-throw",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./index.js",
+  "keywords": ["dsh", "dsh-plugin"],
+  "description": "Fixture whose deferred connection.rpc.handle call throws the way the host's own connection layer does on a fiber without webServer."
+}
