@@ -1220,9 +1220,24 @@ async function main () {
     check('it declares an extensions entry so pi can toggle it', m.pi && m.pi.extensions[0] === './extensions', JSON.stringify(m.pi))
     check('it keeps the bundle version', m.version === '1.2.3', m.version)
     const src = extensionSource({ bundleName: 'x', prefix: 'p', bridgeRoot: '/bridge', source: 'npm:x' })
-    check('the extension imports the bridge by absolute url', /file:\/\/\//.test(src) && src.includes('/src/load.js'), src.slice(0, 160))
-    check('it loads the copy inside the package, not a cache path', src.includes("'..', 'bundle'"), src.split('\n').find((l) => l.includes('BUNDLE')) || '')
+    check('the extension imports the bridge by absolute url', /file:\/\/\//.test(src) && src.includes('/src/dsh-supervisor.js'), src.slice(0, 160))
+    check('it forwards through a DSH host rather than stubbing', src.includes('ensureDshHost') && src.includes('dshHostCall'), 'forwarding refs')
     check('converted packages live outside the bridge itself', !convertedRoot({ USERPROFILE: '/h', HOME: '/h' }).includes('dsh-pi-bridge'), convertedRoot({ USERPROFILE: '/h', HOME: '/h' }))
+  }
+
+  console.log('adopting DSH packages that were installed as ordinary pi packages')
+  {
+    const { needsAdapter, entryDir, ADAPTER_DIR } = await import('../src/adopt.js')
+    check('a dsh bundle with no pi manifest needs adopting', needsAdapter({ name: 'x', dsh: { bundle: {} }, keywords: ['dsh-plugin'] }), 'expected true')
+    check('a package that already has a pi manifest is left alone', !needsAdapter({ name: 'x', dsh: { bundle: {} }, pi: { extensions: ['./e'] } }))
+    check('a plain pi package is not touched', !needsAdapter({ name: 'x', pi: { extensions: ['./e'] } }))
+    check('the adapter lives inside the package it adopts', ADAPTER_DIR === 'dsh-pi-bridge-adapter', ADAPTER_DIR)
+    const npmDir = entryDir('npm:foo', '/s', '/h').replace(/\\/g, '/')
+    check('an npm entry resolves under pi own npm tree', npmDir.endsWith('/.pi/agent/npm/node_modules/foo'), npmDir)
+    const gitDir = entryDir('git:github.com/o/r', '/s', '/h').replace(/\\/g, '/')
+    check('a git entry resolves under pi own git tree', gitDir.endsWith('/.pi/agent/git/github.com/o/r'), gitDir)
+    const relDir = entryDir('..\\..\\tmp\\pkg', '/home/me/.pi/agent', '/h').replace(/\\/g, '/')
+    check('a relative path is resolved against the settings file', relDir.endsWith('/tmp/pkg'), relDir)
   }
 
   console.log('a daemon that cannot start says why, in seconds')

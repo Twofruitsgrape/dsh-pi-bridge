@@ -20,6 +20,7 @@ import { restoreIntoPi } from "../src/restore.js";
 import { dshHostStatus, dshHostLoad, dshHostCall, dshParamsToSchema, dshEndpoint } from "../src/dsh-host-client.js";
 import { ensureDshHost } from "../src/dsh-supervisor.js";
 import { convertToPiPackage } from "../src/convert.js";
+import { adoptInstalled } from "../src/adopt.js";
 
 const REGISTRY = CACHE_ROOT + "/bridges.json";
 
@@ -394,6 +395,22 @@ export default async function (pi) {
   }
   const restore = await restoreIntoPi(pi, replayState, { log: (m) => console.log(m) });
   if (restore.failed.length) console.log("dsh-pi-bridge restore skipped: " + restore.failed.join("; "));
+
+  /*
+   * Adopt DSH plugins that were installed with plain `pi install`. pi gives an
+   * extension no hook for "a package was installed", so the scan happens here:
+   * offline, idempotent, and only touching packages that are a dsh bundle with no
+   * pi manifest. The effect lands on the next start, which is the earliest pi
+   * could load anything new anyway - saying so beats letting it look broken.
+   */
+  try {
+    const { adopted } = await adoptInstalled({ log: () => {} });
+    if (adopted.length) {
+      console.log("dsh-pi-bridge adopted " + adopted.length + " DSH package(s); restart pi to load them: " + adopted.join(", "));
+    }
+  } catch (err) {
+    console.log("dsh-pi-bridge adoption skipped: " + message(err));
+  }
 
   pi.registerTool({
     name: "dsh_preview",
