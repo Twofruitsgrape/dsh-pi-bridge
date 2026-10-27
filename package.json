@@ -12,6 +12,7 @@
   "scripts": {
     "test": "node scripts/run-all.mjs",
     "test:offline": "node scripts/selftest.mjs && node scripts/entry-check.mjs",
+    "test:pack": "node scripts/pack-check.mjs",
     "test:proxy": "node daemon/acceptance.mjs && node daemon/dsh-proxy-e2e.mjs && node daemon/dsh-host-e2e.mjs && node daemon/proxy-e2e.mjs",
     "test:host": "node tools/realhost-check.mjs",
     "test:network": "node tools/e2e-preview.mjs && node tools/edge-cases.mjs",
@@ -53,6 +54,7 @@
     "daemon/bootstrap.js",
     "scripts/selftest.mjs",
     "scripts/entry-check.mjs",
+    "scripts/pack-check.mjs",
     "scripts/run-all.mjs",
     "scripts/loader-unit.mjs",
     "scripts/fixtures/**",

@@ -13,6 +13,9 @@ const ROOT = path.resolve(HERE, "..")
 const SUITES = [
   ["offline pipeline", ["scripts/selftest.mjs"]],
   ["host entries", ["scripts/entry-check.mjs"]],
+  // Last of the packaging checks, because it repacks this tree and tests the
+  // result: every other suite would pass even if `files` had dropped a module.
+  ["packaged tarball", ["scripts/pack-check.mjs"]],
   ["self-bridge", ["tools/selfhost-check.mjs"]],
   ["loader rules", ["scripts/loader-unit.mjs"]],
   ["bridge registry", ["scripts/registry-unit.mjs"]],
