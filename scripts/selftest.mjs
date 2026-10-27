@@ -1121,6 +1121,66 @@ async function main () {
     check('the refusal is still actionable', /npm install -g/.test(String(optOut && optOut.message)))
   }
 
+  console.log('supplying DSH when the machine has none (the other direction)')
+  {
+    const { resolveDsh, findDshModuleDir, dshFailureMessage } = await import('../src/dsh-launch.js')
+    const { provisionDshArgs, ensureDshRuntime, DSH_SPEC } = await import('../src/provision.js')
+    const { withBridgeBundle } = await import('../src/dsh-supervisor.js')
+    const home = path.join(HOME, 'dsh-home')
+    const pkgDir = path.join(home, '.dsh-pi-bridge', 'vendor', 'node_modules', '@deepseek-ai', 'dsh')
+    const cli = path.join(pkgDir, 'lib', 'bin.js')
+    const manifest = JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.1-rc.2', bin: { dsh: 'lib/bin.js' } })
+    const vfs = (fileMap) => ({
+      exists: (p) => Object.prototype.hasOwnProperty.call(fileMap, p),
+      read: (p) => { if (!(p in fileMap)) throw new Error('ENOENT'); return fileMap[p] },
+    })
+
+    // A provisioned DSH is discovered the same way an installed one is.
+    const found = resolveDsh({ env: { PATH: '' }, platform: 'win32', home, ...vfs({ [path.join(pkgDir, 'package.json')]: manifest, [cli]: '' }) })
+    check('a provisioned dsh resolves to its own bin entry', found.ok && found.source === 'package' && found.version === '0.2.1-rc.2' && found.args[0] === cli, JSON.stringify(found).slice(0, 180))
+    check('the dsh package dir is reported for module resolution', findDshModuleDir({ env: { PATH: '' }, platform: 'win32', home, ...vfs({ [path.join(pkgDir, 'package.json')]: manifest }) }) === pkgDir)
+
+    const none = resolveDsh({ env: { PATH: '' }, platform: 'win32', home, ...vfs({}) })
+    check('a machine with no dsh refuses instead of guessing', none.ok === false && /no dsh runtime/.test(none.reason))
+    check('the dsh refusal lists what was looked in', none.ok === false && none.searched.length >= 2, JSON.stringify(none.searched))
+    check('the dsh refusal is actionable', /dsh-pi-bridge\/vendor|DSH_PI_BRIDGE_DSH/.test(dshFailureMessage(none)), dshFailureMessage(none).slice(0, 120))
+
+    const dargs = provisionDshArgs({ env: { USERPROFILE: home, HOME: home } })
+    check('dsh provisioning pins exactly one version', /@deepseek-ai\/dsh@\d+\.\d+\.\d+/.test(DSH_SPEC) && dargs.includes(DSH_SPEC), DSH_SPEC)
+    check('dsh provisioning never runs install scripts', dargs.includes('--ignore-scripts'))
+    check('dsh provisioning keeps dev dependencies out', dargs.includes('--omit=dev'))
+    check('dsh provisioning lands outside both hosts', dargs.join(' ').includes('.dsh-pi-bridge'), dargs.join(' '))
+
+    // Opting out must still refuse rather than replay: falling back silently is
+    // what made "only pi installed" look like it worked.
+    let optOut = null
+    let ranAnyway = false
+    try {
+      await ensureDshRuntime({ env: { PATH: '', USERPROFILE: path.join(HOME, 'dsh-none'), HOME: path.join(HOME, 'dsh-none'), DSH_PI_BRIDGE_NO_PROVISION: '1' }, run: () => { ranAnyway = true } })
+    } catch (e) { optOut = e }
+    check('dsh opting out refuses instead of downloading', !!optOut && optOut.code === 'NO_DSH_NO_PROVISION' && !ranAnyway, String(optOut && optOut.code))
+
+    // The profile the bridge boots must carry the bridge, exactly once.
+    const base = { name: 'dsh-profile-pi-host', dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } }, dependencies: { 'dsh-pi-bridge': 'link:/x' } }
+    const once = withBridgeBundle(base)
+    const twice = withBridgeBundle(once)
+    check('the profile gains the bridge as a bundle', once.dsh.profile.bundles.includes('dsh-pi-bridge'), JSON.stringify(once.dsh.profile.bundles))
+    check('adding it twice does not duplicate it', twice.dsh.profile.bundles.filter((b) => b === 'dsh-pi-bridge').length === 1, JSON.stringify(twice.dsh.profile.bundles))
+    check('the unresolvable link dependency is dropped', !once.dependencies || !once.dependencies['dsh-pi-bridge'], JSON.stringify(once.dependencies))
+    check('the shipped bundles are kept in order', once.dsh.profile.bundles.slice(0, 2).join() === '@deepseek-ai/dsh-base,@deepseek-ai/dsh-web-app')
+    check('the transform does not mutate its input', !base.dsh.profile.bundles.includes('dsh-pi-bridge'), JSON.stringify(base.dsh.profile.bundles))
+
+    // A DSH started from npm runs under plain node, where the Electron roots point
+    // at nothing. Without the CLI layout a bundle that bare-imports the host is
+    // reported as "Cannot find package" - the bundle blamed for our resolver.
+    const { hostModulesRoots } = await import('../src/dsh-loader.js')
+    const cliRoots = hostModulesRoots('/usr/bin/node', '/p/node_modules/@deepseek-ai/dsh/lib/bin.js')
+    check('host module roots cover the npm CLI layout', cliRoots.includes('/p/node_modules'), JSON.stringify(cliRoots))
+    check('host module roots include the package own node_modules', cliRoots.some((r) => r.replace(/\\/g, '/').includes('@deepseek-ai/dsh')), JSON.stringify(cliRoots))
+    const electronRoots = hostModulesRoots('/app/App.exe', '')
+    check('host module roots still cover the Electron layout', electronRoots.some((r) => /resources[\\/]app[\\/]dsh/.test(r)), JSON.stringify(electronRoots))
+  }
+
   console.log('a daemon that cannot start says why, in seconds')
   {
     const { spawn: spawnProc } = await import('node:child_process')

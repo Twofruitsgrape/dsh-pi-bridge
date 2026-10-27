@@ -558,7 +558,7 @@ export async function apply (ctx, config) {
     parameters: { verbose: VERBOSE_ARG },
     output: OUT(),
     execute: guarded(async (args) => {
-      const h = await ensureDaemon({ log })
+      const h = await ensureDaemon({ log, provision: false })
       const t = await listTools().catch(() => ({ tools: [] }))
       if (args && args.verbose) return JSON.stringify({ daemonRaw: h, piTools: t.tools, bridges: state.bridges }, null, 2)
       return JSON.stringify({

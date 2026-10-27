@@ -47,6 +47,14 @@ for (const [label, args] of SUITES) {
   const r = spawnSync(process.execPath, args.map(a => path.join(ROOT, a)), {
     stdio: ["ignore", "inherit", "inherit"], cwd: ROOT,
     timeout: SUITE_TIMEOUT_MS, killSignal: "SIGKILL",
+    // No suite may supply a runtime. Provisioning is a product behaviour and it
+    // downloads hundreds of megabytes; a suite that reached it would turn a
+    // validation test into an install, and did: an empty source passed to
+    // dsh_install started fetching DSH until the suite was killed. Suites that
+    // exercise the fallback assert the refusal instead. Autostart is the same
+    // question one step later - starting a host also leaves a process behind -
+    // so a suite that wants the degraded path asks for it explicitly.
+    env: { ...process.env, DSH_PI_BRIDGE_NO_PROVISION: "1", DSH_PI_BRIDGE_NO_AUTOSTART: "1" },
   })
   if (r.status === 0) console.log(label + ": PASS")
   else if (r.signal) { console.log(label + ": TIMEOUT (" + Math.round(SUITE_TIMEOUT_MS / 1000) + "s, killed by " + r.signal + ")"); failed++ }

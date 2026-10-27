@@ -127,11 +127,32 @@ an empty `PI_CODING_AGENT_DIR` still answers `get_state`, reporting model
 never configured a model. What needs a key is a tool that itself calls a model.
 
 On the **pi side**, native execution of a DSH bundle needs a live DSH session,
-because the bundle wants the real `ctx.tools`, `ctx.llm` and skill registry.
-Without one, `dsh_install` degrades to translation and says so (see above); it
-never claims to have forwarded. Supplying a DSH runtime from pi the same way -
-`@deepseek-ai/dsh` is an installable CLI that boots a profile - is the next piece
-of work and is not claimed here.
+because the bundle wants the real `ctx.tools`, `ctx.llm` and skill registry. With
+only pi installed there is no session to use, so the bridge supplies one:
+
+```text
+> dsh_install({ source: "<a DSH bundle>" })
+bridged <bundle> (via a DSH this bridge started) as dsh-introspect-fixture@1.0.0
+  tools: introspect_is_probe, introspect_is_hold
+  bridged tools are callable in this session immediately.
+```
+
+`@deepseek-ai/dsh` is an installable CLI, so the missing host is provisioned the
+same way pi is, into `~/.dsh-pi-bridge/vendor`. A profile of its own (`pi-host`,
+created from a shipped template, so no existing profile is touched) gets the
+bridge mounted as a bundle, and it is started detached with
+`DSH_PI_BRIDGE_DSH_SERVE` pointing at the loopback port the pi side already knows
+how to talk to - measured at about three seconds from spawn to `/health`. If a
+DSH is already serving, it is reused rather than duplicated.
+
+Two switches exist because supplying a runtime and starting a process are
+different acts: `DSH_PI_BRIDGE_NO_PROVISION=1` refuses to download,
+`DSH_PI_BRIDGE_NO_AUTOSTART=1` refuses to start a host. With either, the install
+falls back to replaying registrations and says which one stopped it - it never
+silently reports the degraded mode as native.
+
+Both directions are checked end to end by `tools/dsh-only-e2e.mjs` and
+`tools/pi-only-e2e.mjs`, each from an environment built to lack the other host.
 
 ### Parameter and result shapes
 
@@ -172,6 +193,14 @@ npm run test:network    # real published packages from npm and GitHub
 npm run test:live       # the above against an actually running pi
 ```
 
+Two checks are deliberately not npm scripts, because they build an environment
+with one host missing and may provision the other one (hundreds of megabytes):
+
+```bash
+node tools/dsh-only-e2e.mjs   # no pi anywhere: a pi package installs and answers
+node tools/pi-only-e2e.mjs    # no DSH anywhere: a DSH bundle runs natively
+```
+
 `test:host` reads the installed host's own `@deepseek-ai/dsh-tools` from inside
 its asar, which only an Electron-patched fs can reach; run it from a host
 process. Under plain node it reports an explicit SKIP instead of implying the
@@ -195,7 +224,7 @@ was run in:
 |---|---|
 | node | 22.22.2 (`engines` also allows >=24) |
 | pi | 1.4.0 - `@earendil-works/pi-coding-agent`, entry `dist/bundle/cli.js` |
-| DSH | 0.2.1-rc.3 - DeepSeek Harness desktop, runtime unpacked at `resources/app` |
+| DSH | 0.2.1-rc.3 desktop, runtime unpacked at `resources/app`; 0.2.1-rc.2 CLI (`@deepseek-ai/dsh`, the version the bridge provisions when DSH is absent) |
 | OS | Windows x64 |
 
 The DSH row is not incidental: 0.2.1-rc.3 moved the runtime out of `app.asar`, and

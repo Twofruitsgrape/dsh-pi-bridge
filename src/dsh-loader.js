@@ -37,15 +37,38 @@ export function isHostSpecifier (s) {
  * every bare '@deepseek-ai/*' import from a bundle would have failed with
  * MODULE_NOT_FOUND - the exact failure this loader exists to prevent.
  */
-export function hostModulesRoots (execPath = process.execPath) {
+export function hostModulesRoots (execPath = process.execPath, argvEntry = process.argv[1]) {
   const exe = String(execPath || '')
-  if (!exe) return []
-  const resources = path.join(path.dirname(exe), 'resources')
-  return [
-    path.join(resources, 'app', 'dsh', 'node_modules'),
-    path.join(resources, 'app.asar', 'dsh', 'node_modules'),
-    path.join(resources, 'app.asar.unpacked', 'dsh', 'node_modules'),
-  ]
+  const roots = []
+  if (exe) {
+    const resources = path.join(path.dirname(exe), 'resources')
+    roots.push(
+      path.join(resources, 'app', 'dsh', 'node_modules'),
+      path.join(resources, 'app.asar', 'dsh', 'node_modules'),
+      path.join(resources, 'app.asar.unpacked', 'dsh', 'node_modules'),
+    )
+  }
+  /*
+   * The npm CLI layout, which the Electron roots above cannot describe.
+   *
+   * A `dsh` installed from npm runs as `<prefix>/node_modules/@deepseek-ai/dsh/
+   * lib/bin.js` under plain node, so `dirname(execPath)/resources` does not exist
+   * and every root above points at nothing. Bare host imports were then reported
+   * as "Cannot find package" - blaming the bundle for a resolver that never
+   * looked anywhere real. Derived from argv rather than guessed: the entry script
+   * of the running process is exactly the path that has the host's modules beside
+   * it, and a bridge that starts its own DSH is the case this serves.
+   */
+  const entry = String(argvEntry || '')
+  const norm = entry.replace(/\\/g, '/')
+  const at = norm.lastIndexOf('/node_modules/')
+  if (at > 0) {
+    roots.push(norm.slice(0, at) + '/node_modules')
+    // Scoped and pnpm installs keep a package's own copies one level down, so the
+    // package directory itself is a root too (`.../lib/bin.js` -> two levels up).
+    roots.push(path.join(path.dirname(path.dirname(entry)), 'node_modules'))
+  }
+  return roots
 }
 
 /** Resolve one host specifier to a real module file inside the running build. */

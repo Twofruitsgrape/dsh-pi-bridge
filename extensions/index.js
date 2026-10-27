@@ -18,6 +18,7 @@ import { CACHE_ROOT } from "../src/resolve.js";
 import { updateRegistry } from "../src/registry.js";
 import { restoreIntoPi } from "../src/restore.js";
 import { dshHostStatus, dshHostLoad, dshHostCall, dshParamsToSchema, dshEndpoint } from "../src/dsh-host-client.js";
+import { ensureDshHost } from "../src/dsh-supervisor.js";
 
 const REGISTRY = CACHE_ROOT + "/bridges.json";
 
@@ -150,8 +151,38 @@ export default async function (pi) {
     return { spec, loaded, report, prefix, mode: "dsh-host" };
   }
 
+  /**
+   * A live DSH to load into, starting one when the machine only has pi.
+   *
+   * The requirement is symmetric: "no DSH is running" must not mean "degrade to
+   * stand-ins", because a user with only pi installed has no way to make one run
+   * by hand. The missing host is supplied here the same way DSH supplies pi, and
+   * a machine that declines to download still falls through to replay - with the
+   * reason, since a fallback nobody can explain gets reported as a bridge defect.
+   *
+   * @returns {Promise<{ok:boolean, started?:boolean, error?:string}>}
+   */
+  async function dshHostOrNull() {
+    if (await liveDshAvailable()) return { ok: true, started: false };
+    try {
+      const host = await ensureDshHost({ log: () => {} });
+      return { ok: true, started: !host.reused };
+    } catch (err) {
+      return { ok: false, error: message(err) };
+    }
+  }
+
   async function installDsh(spec, opts) {
-    if (await liveDshAvailable()) {
+    // Validate before supplying anything. A call with no source is a mistake in
+    // the call, not a reason to fetch the other host: the first version of this
+    // reached ensureDshHost with an empty string and started an 800MB install from
+    // a validation test, which is both wrong and the kind of side effect a tool
+    // must never have.
+    if (!spec || !String(spec).trim()) {
+      throw new Error("dsh-install needs a package: npm:<name>, git:github.com/<owner>/<repo>, or a local path");
+    }
+    const host = await dshHostOrNull();
+    if (host.ok) {
       const viaHost = await installDshViaHost(spec, opts);
       const record = {
         name: (viaHost.loaded && viaHost.loaded.name) || spec,
@@ -160,7 +191,7 @@ export default async function (pi) {
         at: new Date().toISOString(),
       };
       await updateRegistry(REGISTRY, { upserts: { [spec]: record } });
-      return formatReport(spec + " (via live DSH)", { info: { name: (viaHost.loaded && viaHost.loaded.name) || spec, version: (viaHost.loaded && viaHost.loaded.version) || "" } }, viaHost.report);
+      return formatReport(spec + (host.started ? " (via a DSH this bridge started)" : " (via live DSH)"), { info: { name: (viaHost.loaded && viaHost.loaded.name) || spec, version: (viaHost.loaded && viaHost.loaded.version) || "" } }, viaHost.report);
     }
     const captured = await loadForeign(spec, { host: "dsh", refresh: !!(opts && opts.refresh) });
     const prefix = (opts && opts.prefix) || shortPrefix(captured.info.name);
@@ -176,7 +207,10 @@ export default async function (pi) {
       at: new Date().toISOString(),
     };
     await updateRegistry(REGISTRY, { upserts: { [spec]: record } });
-    return formatReport(spec, captured, report, "replay");
+    const replay = formatReport(spec, captured, report, "replay");
+    // Why it degraded, when the reason came from this side rather than from the
+    // bundle. Without it a fallback reads as the bridge failing to forward.
+    return host.error ? replay + "\n  why: " + host.error : replay;
   }
 
   function firstArg(args) {
