@@ -1,5 +1,7 @@
 node_modules/
 .tmp/
+# agent session notes: local scratch, never published
+.workbuddy/
 *.tgz
 # session scaffolding: never commit or publish
 .tmp-*

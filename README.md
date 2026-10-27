@@ -94,6 +94,34 @@ bundle that is only a skill directory has nothing to call remotely, and the skil
 simply travels. Both hosts implement the
 [Agent Skills specification](https://agentskills.io/specification).
 
+### When only one host is installed
+
+The two directions do not need the same thing from the machine.
+
+On the **DSH side**, a bridged pi package runs inside a real pi process, so pi
+itself has to be present. It is located before anything is spawned -
+`DSH_PI_BRIDGE_PI` first, then a `@earendil-works/pi-coding-agent` install, then
+a `pi` on PATH - and when none of those answers, the first `pi_install` and
+`bridge_status` report which lookup failed and the command that fixes it, rather
+than waiting out the startup budget. Measured on a machine with no pi at all:
+1.3s and a named cause, against 45s and "did not become ready" before. Vendoring
+a copy is enough:
+
+```bash
+npm install --prefix ~/.dsh-pi-bridge/vendor @earendil-works/pi-coding-agent
+```
+
+A vendored copy starts and registers tools with no provider credentials at all -
+an empty `PI_CODING_AGENT_DIR` still answers `get_state`, reporting model
+`unknown` - so the tool-only half of a pi package works on a machine that has
+never configured a model. What needs a key is a tool that itself calls a model.
+
+On the **pi side**, native execution of a DSH bundle needs a live DSH session,
+because the bundle wants the real `ctx.tools`, `ctx.llm` and skill registry.
+Without one, `dsh_install` degrades to translation and says so (see above); it
+never claims to have forwarded. Supervising a DSH child process from pi would be
+a larger change, and is not claimed here.
+
 ### Parameter and result shapes
 
 A DSH tool carries a property spec map

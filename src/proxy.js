@@ -194,11 +194,17 @@ export async function ensureDaemon (options) {
     child.unref()
     const attempts = Math.max(2, Math.round(budgetMs / 1000))
     for (let i = 0; i < attempts; i++) {
-      await new Promise((r) => setTimeout(r, 1000))
-      try {
-        const h = await health()
-        if (h && h.ok && h.ctx) { log('daemon up (pid ' + h.pid + ')'); return h }
-      } catch { /* keep waiting */ }
+      await new Promise((r) => setTimeout(r, i === 0 ? 250 : 1000))
+      let h = null
+      try { h = await health() } catch { /* daemon not listening yet */ }
+      if (h && h.ok && h.ctx) { log('daemon up (pid ' + h.pid + ')'); return h }
+      // A daemon that names a reason it cannot start will not start. Reporting it
+      // now is what turns "did not become ready within 45000ms" into the sentence
+      // that says which lookup failed and how to satisfy it.
+      if (h && h.terminal) {
+        await record('daemon cannot start: ' + h.reason + '\n')
+        throw new Error(h.reason)
+      }
     }
     throw new Error('the pi daemon did not become ready within ' + budgetMs + 'ms; check ' + LOG)
   })().finally(() => { starting = null })

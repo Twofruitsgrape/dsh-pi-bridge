@@ -14,12 +14,11 @@
  */
 import { spawn } from 'node:child_process'
 import { appendFile, mkdir } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
-import os from 'node:os'
 import { buildFingerprint } from '../src/build-id.js'
+import { resolvePi, findPiModuleDir, piFailureMessage } from '../src/pi-launch.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..')
@@ -36,43 +35,55 @@ try { packages = JSON.parse(arg('packages', '[]')) } catch { packages = [] }
 const JOURNAL = arg('journal', path.join(ROOT, '.tmp', 'daemon', 'journal.txt'))
 const AUTO_DIALOG = process.env.DSH_PI_BRIDGE_AUTO_DIALOG !== '0'
 
+await mkdir(path.dirname(JOURNAL), { recursive: true })
+const step = (m) => appendFile(JOURNAL, '[' + new Date().toISOString().slice(11, 19) + '] ' + m + '\n', 'utf8')
+
 /**
  * Where pi's own package lives: jiti and the host-package aliases resolve from
  * here, so a bridged package imports pi's genuine modules instead of stubs.
  */
-function findPiModuleDir () {
-  if (process.env.PI_MODULE_DIR) return process.env.PI_MODULE_DIR
-  const roots = [
-    path.join(os.homedir(), 'AppData', 'Roaming', 'npm', 'node_modules'),
-    '/usr/local/lib/node_modules',
-    '/usr/lib/node_modules',
-  ].filter(Boolean)
-  for (const r of roots) {
-    const dir = path.join(r, '@earendil-works', 'pi-coding-agent')
-    try { if (existsSync(path.join(dir, 'package.json'))) return dir } catch { /* next */ }
-  }
-  return ''
-}
+const PI_MODULE = findPiModuleDir({ env: process.env })
 
-await mkdir(path.dirname(JOURNAL), { recursive: true })
-const step = (m) => appendFile(JOURNAL, '[' + new Date().toISOString().slice(11, 19) + '] ' + m + '\n', 'utf8')
+/**
+ * pi itself, looked up rather than hoped for.
+ *
+ * A bare `pi` spawn leaves the decision to PATH, and a machine that installed the
+ * bridge on the DSH side only has no pi there. That surfaced as a 45 second wait
+ * and the words "did not become ready", with the actual cause never stated.
+ * Resolving first turns it into one sentence naming what is missing.
+ */
+const PI = resolvePi({ env: process.env })
+let terminal = PI.ok ? '' : piFailureMessage(PI)
 
 // --no-extensions keeps loading under the bridge's control: pi's own discovery
 // would load the same package a second time, and a duplicate registerTool is a
 // real conflict rather than something the bridge can paper over.
-const child = spawn('pi', ['--mode', 'rpc', '--no-session', '--no-extensions', '--extension', path.join(HERE, 'bootstrap.js')], {
-  cwd: ROOT,
-  shell: process.platform === 'win32',
-  windowsHide: true,
-  stdio: ['pipe', 'pipe', 'pipe'],
-  env: {
-    ...process.env,
-    DSH_PI_BRIDGE_PACKAGES: JSON.stringify(packages),
-    DSH_PI_BRIDGE_PORT: String(UPSTREAM),
-    PI_MODULE_DIR: findPiModuleDir(),
-  },
-})
-void step('spawn pi --mode rpc pid=' + child.pid + ' packages=' + JSON.stringify(packages))
+let child = null
+if (PI.ok) {
+  // --no-extensions keeps loading under the bridge's control: pi's own discovery
+  // would load the same package a second time, and a duplicate registerTool is a
+  // real conflict rather than something the bridge can paper over.
+  const piArgs = [...PI.args, '--mode', 'rpc', '--no-session', '--no-extensions', '--extension', path.join(HERE, 'bootstrap.js')]
+  // A .cmd shim only runs through the shell, and the shell splits on spaces it
+  // was never told about; every other resolution is a real executable and is
+  // spawned directly, so no argument is ever re-parsed.
+  const shell = /\.(cmd|bat)$/i.test(PI.command)
+  child = spawn(PI.command, shell ? piArgs.map((a) => (/\s/.test(a) ? '"' + a + '"' : a)) : piArgs, {
+    cwd: ROOT,
+    shell,
+    windowsHide: true,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      DSH_PI_BRIDGE_PACKAGES: JSON.stringify(packages),
+      DSH_PI_BRIDGE_PORT: String(UPSTREAM),
+      PI_MODULE_DIR: PI_MODULE,
+    },
+  })
+  void step('pi ' + (PI.version || '?') + ' via ' + PI.source + ' -> ' + PI.command + ' ' + PI.args.join(' ') + ' pid=' + child.pid + ' packages=' + JSON.stringify(packages))
+} else {
+  void step('pi not found; refusing to wait: ' + PI.searched.join(' | '))
+}
 
 const waiting = new Map()
 const dialogs = []
@@ -88,7 +99,7 @@ function rpcCommand (obj, ms = 30000) {
 }
 
 let stdoutBuf = ''
-child.stdout.on('data', (d) => {
+if (child) child.stdout.on('data', (d) => {
   stdoutBuf += d.toString('utf8')
   let nl
   while ((nl = stdoutBuf.indexOf('\n')) >= 0) {
@@ -125,9 +136,17 @@ child.stdout.on('data', (d) => {
   }
 })
 let stderrTail = ''
-child.stderr.on('data', (d) => { stderrTail = (stderrTail + d.toString()).slice(-4000) })
-child.on('error', (e) => void step('spawn error ' + e.message))
-child.on('close', (c) => void step('pi exited code=' + c + ' stderr=' + stderrTail.replace(/\s+/g, ' ').slice(-200)))
+if (child) {
+  child.stderr.on('data', (d) => { stderrTail = (stderrTail + d.toString()).slice(-4000) })
+  child.on('error', (e) => void step('spawn error ' + e.message))
+  // A pi that exits cannot come back on its own, so /health must stop claiming to
+  // be waiting: the caller needs the exit code and the last thing pi said, not a
+  // timeout that repeats neither.
+  child.on('close', (c) => {
+    void step('pi exited code=' + c + ' stderr=' + stderrTail.replace(/\s+/g, ' ').slice(-200))
+    if (!terminal) terminal = 'the pi process exited (code ' + c + ')' + (stderrTail.trim() ? ': ' + stderrTail.trim().replace(/\s+/g, ' ').slice(-400) : '')
+  })
+}
 
 async function forward (reqPath, body) {
   const res = await fetch('http://127.0.0.1:' + UPSTREAM + reqPath, {
@@ -157,8 +176,14 @@ const server = createServer((req, res) => {
         setTimeout(() => shutdown('requested'), 200)
         return
       }
+      if (p === '/health' && terminal) {
+        // Answered here, not forwarded: there is no bootstrap to ask, and a
+        // forwarded request would report a connection error and then a timeout -
+        // which is how a stated cause previously arrived as "did not become ready".
+        return res.end(JSON.stringify({ ok: false, terminal: true, reason: terminal }))
+      }
       if (p === '/daemon') {
-        return res.end(JSON.stringify({ pid: child.pid, alive: child.exitCode === null, packages, upstream: UPSTREAM, dialogs: dialogs.length }))
+        return res.end(JSON.stringify({ pid: child ? child.pid : null, alive: !!child && child.exitCode === null, packages, upstream: UPSTREAM, dialogs: dialogs.length, reason: terminal || undefined }))
       }
       const body = raw ? JSON.parse(raw) : null
       const out = await forward(p, body)
@@ -206,6 +231,7 @@ process.on('SIGINT', () => shutdown('SIGINT'))
 process.on('SIGTERM', () => shutdown('SIGTERM'))
 
 void (async () => {
+  if (!child) return
   // pi starts a session only when there is work, and the bootstrap captures its
   // extension context with it. get_state opens the channel; --no-session keeps
   // the run off disk.

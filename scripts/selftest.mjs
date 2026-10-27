@@ -1035,6 +1035,82 @@ async function main () {
   const self = await loadForeign(ROOT, { host: 'auto' })
   check('self detected for both hosts', !!(self.info.pi && self.info.dsh), JSON.stringify(self.info.signals))
 
+  console.log('pi runtime resolution: the machine with only one side installed')
+  {
+    const { resolvePi, findPiModuleDir, piFailureMessage } = await import('../src/pi-launch.js')
+    const win = 'win32'
+    const home = path.join(HOME, 'fake-home')
+    const pkgDir = path.join(home, 'AppData', 'Roaming', 'npm', 'node_modules', '@earendil-works', 'pi-coding-agent')
+    const cli = path.join(pkgDir, 'dist', 'bundle', 'cli.js')
+    const manifest = JSON.stringify({ version: '1.4.0', bin: { pi: 'dist/bundle/cli.js' } })
+    // A described filesystem, so "no pi at all" is a case a test can state rather
+    // than a machine someone has to build.
+    const vfs = (fileMap) => ({
+      exists: (p) => Object.prototype.hasOwnProperty.call(fileMap, p),
+      read: (p) => { if (!(p in fileMap)) throw new Error('ENOENT'); return fileMap[p] },
+    })
+
+    const full = resolvePi({ env: { PATH: '' }, platform: win, home, ...vfs({ [path.join(pkgDir, 'package.json')]: manifest, [cli]: '' }) })
+    check('an installed package resolves to its own bin entry', full.ok && full.source === 'package' && full.version === '1.4.0' && full.args[0] === cli, JSON.stringify(full))
+    check('the package form runs under this node, not a shell shim', full.ok && full.command === process.execPath)
+
+    const piCmd = path.join(home, 'AppData', 'Roaming', 'npm', 'pi.cmd')
+    const onPath = resolvePi({ env: { PATH: path.dirname(piCmd) }, platform: win, home, ...vfs({ [piCmd]: '' }) })
+    check('a pi on PATH is used as found', onPath.ok && onPath.source === 'path' && onPath.command === piCmd, JSON.stringify(onPath))
+
+    const override = resolvePi({ env: { PATH: '', DSH_PI_BRIDGE_PI: path.join(HOME, 'opt', 'cli.js') }, platform: 'linux', home, ...vfs({ [path.join(HOME, 'opt', 'cli.js')]: '' }) })
+    check('an explicit DSH_PI_BRIDGE_PI wins over discovery', override.ok && override.source === 'override' && override.command === process.execPath, JSON.stringify(override))
+
+    const missingOverride = resolvePi({ env: { PATH: '', DSH_PI_BRIDGE_PI: '/definitely/not/here/cli.js' }, platform: 'linux', home, ...vfs({}) })
+    check('a missing override is reported, not silently skipped', !missingOverride.ok && missingOverride.searched.some((s) => s.includes('/definitely/not/here')), JSON.stringify(missingOverride.searched))
+
+    const noPi = resolvePi({ env: { PATH: '' }, platform: win, home, ...vfs({}) })
+    const message = noPi.ok ? '' : piFailureMessage(noPi)
+    check('a machine with no pi refuses instead of guessing', noPi.ok === false && /no pi runtime/.test(noPi.reason))
+    check('the refusal lists what was looked in', noPi.ok === false && noPi.searched.length >= 2, JSON.stringify(noPi.searched))
+    check('the refusal carries the install command', /npm install -g @earendil-works\/pi-coding-agent/.test(message), message.slice(0, 120))
+
+    // The two questions must stay separate: a package whose bin is missing still
+    // supplies the modules jiti aliases, but it cannot be run.
+    const noBin = vfs({ [path.join(pkgDir, 'package.json')]: manifest })
+    check('a package without its bin still yields a module dir', findPiModuleDir({ env: { PATH: '' }, platform: win, home, ...noBin }) === pkgDir)
+    check('but it is not a runnable pi', resolvePi({ env: { PATH: '' }, platform: win, home, ...noBin }).ok === false)
+  }
+
+  console.log('a daemon that cannot start says why, in seconds')
+  {
+    const { spawn: spawnProc } = await import('node:child_process')
+    const { request: httpRequest } = await import('node:http')
+    const port = 45000 + Math.floor(Math.random() * 400)
+    const isolated = path.join(HOME, 'no-pi-home')
+    await mkdir(isolated, { recursive: true })
+    const proc = spawnProc(process.execPath, [path.join(ROOT, 'daemon', 'run.mjs'), '--port', String(port), '--journal', path.join(HOME, 'no-pi-journal.txt')], {
+      env: { ...process.env, PATH: '', Path: '', USERPROFILE: isolated, HOME: isolated, PI_MODULE_DIR: '', DSH_PI_BRIDGE_PI: '' },
+      stdio: 'ignore', windowsHide: true,
+    })
+    const get = (route, ms) => new Promise((res, rej) => {
+      const req = httpRequest({ host: '127.0.0.1', port, path: route, method: 'GET', agent: false, timeout: ms }, (r) => {
+        let raw = ''
+        r.on('data', (c) => { raw += c })
+        r.on('end', () => { try { res(JSON.parse(raw)) } catch (e) { rej(e) } })
+      })
+      req.on('timeout', () => req.destroy(new Error('timeout')))
+      req.on('error', rej)
+      req.end()
+    })
+    const started = Date.now()
+    let h = null
+    for (let i = 0; i < 24 && !h; i++) {
+      await new Promise((r) => setTimeout(r, 250))
+      try { h = await get('/health', 800) } catch { /* not listening yet */ }
+    }
+    const elapsed = Date.now() - started
+    check('health answers with a terminal reason', !!(h && h.terminal && /needs a pi runtime/.test(h.reason)), JSON.stringify(h).slice(0, 240))
+    check('it answers in seconds, not the 45s budget', elapsed < 5000, elapsed + 'ms')
+    check('the reason is the actionable message, not a symptom', !!(h && /npm install -g/.test(h.reason)), String(h && h.reason).slice(0, 160))
+    try { proc.kill() } catch { /* already gone */ }
+  }
+
   console.log('')
   console.log(failures ? (checks - failures) + '/' + checks + ' checks passed, ' + failures + ' FAILED' : 'all ' + checks + ' checks passed')
   if (process.env.SELFTEST_KEEP !== '1') await rm(HOME, { recursive: true, force: true })
