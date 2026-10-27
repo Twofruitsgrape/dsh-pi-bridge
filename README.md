@@ -101,14 +101,24 @@ The two directions do not need the same thing from the machine.
 On the **DSH side**, a bridged pi package runs inside a real pi process, so pi
 itself has to be present. It is located before anything is spawned -
 `DSH_PI_BRIDGE_PI` first, then a `@earendil-works/pi-coding-agent` install, then
-a `pi` on PATH - and when none of those answers, the first `pi_install` and
-`bridge_status` report which lookup failed and the command that fixes it, rather
-than waiting out the startup budget. Measured on a machine with no pi at all:
-1.3s and a named cause, against 45s and "did not become ready" before. Vendoring
-a copy is enough:
+a `pi` on PATH - and when none of those answers, the bridge installs one itself,
+pinned, into `~/.dsh-pi-bridge/vendor`:
+
+```text
+no pi runtime found; installing @earendil-works/pi-coding-agent@1.4.0 into ~/.dsh-pi-bridge/vendor
+provisioned pi 1.4.0 at ~/.dsh-pi-bridge/vendor/node_modules/@earendil-works/pi-coding-agent
+daemon up (pid 11312)
+```
+
+Measured on a machine with npm but no pi at all: 18 seconds to a captured
+extension context, with no intervention. The install is pinned to one version,
+runs with `--omit=dev --ignore-scripts`, and lands outside both hosts, so it can
+be deleted without touching an installation. `DSH_PI_BRIDGE_NO_PROVISION=1`
+refuses instead of downloading, and says which lookup failed and what to install
+- the same message a failed provisioning ends with. Vendoring by hand works too:
 
 ```bash
-npm install --prefix ~/.dsh-pi-bridge/vendor @earendil-works/pi-coding-agent
+npm install --prefix ~/.dsh-pi-bridge/vendor @earendil-works/pi-coding-agent@1.4.0
 ```
 
 A vendored copy starts and registers tools with no provider credentials at all -
@@ -119,8 +129,9 @@ never configured a model. What needs a key is a tool that itself calls a model.
 On the **pi side**, native execution of a DSH bundle needs a live DSH session,
 because the bundle wants the real `ctx.tools`, `ctx.llm` and skill registry.
 Without one, `dsh_install` degrades to translation and says so (see above); it
-never claims to have forwarded. Supervising a DSH child process from pi would be
-a larger change, and is not claimed here.
+never claims to have forwarded. Supplying a DSH runtime from pi the same way -
+`@deepseek-ai/dsh` is an installable CLI that boots a profile - is the next piece
+of work and is not claimed here.
 
 ### Parameter and result shapes
 

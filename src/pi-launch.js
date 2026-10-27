@@ -57,6 +57,32 @@ function hit (command, args, source, version, moduleDir) {
 }
 
 /**
+ * The package directory containing a given file, found by walking up to a
+ * package.json whose name is pi's.
+ *
+ * This is what makes an explicit DSH_PI_BRIDGE_PI as complete as a discovered
+ * install: pointing at `dist/bundle/cli.js` used to leave the module directory
+ * empty, and the daemon then loaded with "PI_MODULE_DIR unset: cannot load
+ * TypeScript extensions" - a vendored runtime that could start but could not run
+ * a TypeScript package, which is most of them.
+ */
+function packageDirOf (file, exists, read) {
+  let dir = path.dirname(path.resolve(file))
+  for (let i = 0; i < 6; i++) {
+    if (exists(path.join(dir, 'package.json'))) {
+      try {
+        const pkg = JSON.parse(read(path.join(dir, 'package.json')))
+        if (typeof pkg.name === 'string' && pkg.name.includes('pi-coding-agent')) return dir
+      } catch { /* keep walking */ }
+    }
+    const up = path.dirname(dir)
+    if (up === dir) break
+    dir = up
+  }
+  return ''
+}
+
+/**
  * The pi package directory, regardless of how the executable was found.
  *
  * Kept separate from resolvePi because they answer different questions: the
@@ -109,13 +135,20 @@ export function resolvePi (options = {}) {
   const override = env.DSH_PI_BRIDGE_PI
   if (override) {
     if (/\.(c|m)?js$/.test(override)) {
-      if (exists(override)) return hit(process.execPath, [override], 'override', '', '')
+      if (exists(override)) {
+        // An override names an executable, but pi's modules still have to be
+        // found: a vendored copy pointed at this way must be as usable as an
+        // installed one, TypeScript extensions included.
+        const moduleDir = packageDirOf(override, exists, read)
+        const entry = moduleDir ? binEntry(moduleDir, read) : null
+        return hit(process.execPath, [override], 'override', (entry && entry.version) || '', moduleDir)
+      }
       searched.push('DSH_PI_BRIDGE_PI=' + override + ' (no such file)')
     } else if (!override.includes('/') && !override.includes(path.sep)) {
       // A bare command name the user chose deliberately: taken as given.
       return hit(override, [], 'override', '', '')
     } else if (exists(override)) {
-      return hit(override, [], 'override', '', '')
+      return hit(override, [], 'override', '', packageDirOf(override, exists, read))
     } else {
       searched.push('DSH_PI_BRIDGE_PI=' + override + ' (no such file)')
     }

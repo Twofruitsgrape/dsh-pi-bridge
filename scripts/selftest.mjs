@@ -1077,6 +1077,50 @@ async function main () {
     check('but it is not a runnable pi', resolvePi({ env: { PATH: '' }, platform: win, home, ...noBin }).ok === false)
   }
 
+  console.log('supplying pi when the machine has none')
+  {
+    const { provisionArgs, ensurePiRuntime, PI_SPEC } = await import('../src/provision.js')
+    const args = provisionArgs({ env: { USERPROFILE: path.join(HOME, 'x'), HOME: path.join(HOME, 'x') } })
+    check('provisioning pins exactly one pi version', /@earendil-works\/pi-coding-agent@\d+\.\d+\.\d+$/.test(PI_SPEC) && args.includes(PI_SPEC), PI_SPEC)
+    check('provisioning never runs install scripts', args.includes('--ignore-scripts'), args.join(' '))
+    check('provisioning keeps dev dependencies out', args.includes('--omit=dev'))
+    check('provisioning lands outside both hosts', args.join(' ').includes('.dsh-pi-bridge'), args.join(' '))
+
+    const writeFakePi = async (home) => {
+      const dir = path.join(home, '.dsh-pi-bridge', 'vendor', 'node_modules', '@earendil-works', 'pi-coding-agent')
+      await mkdir(path.join(dir, 'dist', 'bundle'), { recursive: true })
+      await writeFile(path.join(dir, 'package.json'), JSON.stringify({ name: '@earendil-works/pi-coding-agent', version: '1.4.0', bin: { pi: 'dist/bundle/cli.js' } }))
+      await writeFile(path.join(dir, 'dist', 'bundle', 'cli.js'), '')
+    }
+
+    // Already installed: npm must not be reached at all.
+    const withPi = path.join(HOME, 'prov-with')
+    await writeFakePi(withPi)
+    const already = await ensurePiRuntime({ env: { PATH: '', USERPROFILE: withPi, HOME: withPi }, run: () => { throw new Error('npm must not run when pi exists') } })
+    check('an existing runtime is used without provisioning', already.ok && already.provisioned === false && already.source === 'package', JSON.stringify(already).slice(0, 160))
+    check('it reports the module dir the daemon needs', !!already.moduleDir && already.version === '1.4.0', already.moduleDir)
+
+    // Absent: provisioned once, then usable.
+    const fresh = path.join(HOME, 'prov-fresh')
+    let invocations = 0
+    const provisioned = await ensurePiRuntime({
+      env: { PATH: '', USERPROFILE: fresh, HOME: fresh },
+      run: async () => { invocations++; await writeFakePi(fresh); return { status: 0, stdout: '', stderr: '' } },
+    })
+    check('a missing runtime is provisioned', provisioned.ok && provisioned.provisioned === true, JSON.stringify(provisioned).slice(0, 160))
+    check('provisioning ran npm exactly once', invocations === 1, String(invocations))
+
+    // Opting out must refuse, not download.
+    const emptyHome = path.join(HOME, 'prov-none')
+    let optOut = null
+    let ranAnyway = false
+    try {
+      await ensurePiRuntime({ env: { PATH: '', USERPROFILE: emptyHome, HOME: emptyHome, DSH_PI_BRIDGE_NO_PROVISION: '1' }, run: () => { ranAnyway = true } })
+    } catch (e) { optOut = e }
+    check('opting out refuses instead of downloading', !!optOut && optOut.code === 'NO_PI_NO_PROVISION' && !ranAnyway, String(optOut && optOut.code))
+    check('the refusal is still actionable', /npm install -g/.test(String(optOut && optOut.message)))
+  }
+
   console.log('a daemon that cannot start says why, in seconds')
   {
     const { spawn: spawnProc } = await import('node:child_process')

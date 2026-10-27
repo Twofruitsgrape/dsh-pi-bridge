@@ -18,6 +18,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { resolve as resolveSource, installDependencies, CACHE_ROOT } from './resolve.js'
+import { ensurePiRuntime } from './provision.js'
 import { classify, piEntries } from './manifest.js'
 import { buildFingerprint } from './build-id.js'
 
@@ -174,6 +175,12 @@ export async function ensureDaemon (options) {
   if (starting) return starting
   starting = (async () => {
     await record('\n[' + new Date().toISOString() + '] starting daemon\n')
+    // A machine that installed only the DSH side is a supported arrangement, not
+    // an error: the pi runtime the daemon supervises is supplied here, before
+    // anything is spawned. Doing it first is what keeps the user out of the
+    // "did not become ready" class of failure entirely.
+    const runtime = await ensurePiRuntime({ log: (m) => { log(m); void record('runtime: ' + m + '\n') } })
+    void record('pi runtime: ' + runtime.source + ' ' + (runtime.version || '?') + (runtime.provisioned ? ' (provisioned)' : '') + '\n')
     const launch = daemonLaunch()
     child = spawn(launch.command, launch.args, {
       cwd: ROOT, detached: false, windowsHide: true,
