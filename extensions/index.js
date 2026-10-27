@@ -19,6 +19,7 @@ import { updateRegistry } from "../src/registry.js";
 import { restoreIntoPi } from "../src/restore.js";
 import { dshHostStatus, dshHostLoad, dshHostCall, dshParamsToSchema, dshEndpoint } from "../src/dsh-host-client.js";
 import { ensureDshHost } from "../src/dsh-supervisor.js";
+import { convertToPiPackage } from "../src/convert.js";
 
 const REGISTRY = CACHE_ROOT + "/bridges.json";
 
@@ -243,6 +244,28 @@ export default async function (pi) {
     },
   });
 
+  pi.registerCommand("dsh-convert", {
+    description: "Convert a DSH plugin bundle into a real pi package, so it appears in pi's plugin settings with an on/off switch",
+    handler: async (args, ctx) => {
+      const spec = firstArg(args);
+      if (!spec) return notify(ctx, "usage: /dsh-convert <npm:pkg | github:owner/repo | url | local path>", "error");
+      notify(ctx, "converting " + spec + " into a pi package ...", "info");
+      try {
+        const r = await convertToPiPackage(spec, { log: () => {} });
+        notify(ctx, [
+          "converted to " + r.name,
+          "  package: " + r.dir,
+          "  tools: " + (r.tools.length ? r.tools.join(", ") : "none"),
+          r.installed
+            ? "  registered with pi: reload the session to see it in plugin settings"
+            : "  NOT registered with pi: " + r.note,
+        ].join("\n"), r.installed ? "info" : "error");
+      } catch (e) {
+        notify(ctx, "dsh-convert failed: " + message(e), "error");
+      }
+    },
+  });
+
   pi.registerCommand("dsh-preview", {
     description: "Inspect what a DSH plugin bundle would contribute before installing it",
     handler: async (args, ctx) => {
@@ -305,6 +328,43 @@ export default async function (pi) {
         return { content: [{ type: "text", text: await installDsh(params.source, params) }], details: { bridge: "dsh-install" } };
       } catch (e) {
         return { content: [{ type: "text", text: "dsh_install failed: " + message(e) }], details: { error: true } };
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "dsh_convert",
+    label: "Convert DSH plugin to a pi package",
+    description: "Convert a DeepSeek Harness plugin bundle into a real pi package and register it with pi, so it shows up in pi's plugin settings with an on/off switch. dsh_install only adds tools to the current session; this one produces something pi manages. Accepts npm:<pkg>, git:github.com/<owner>/<repo>, or a local path.",
+    promptSnippet: "Convert a DSH plugin into a toggleable pi package",
+    parameters: {
+      type: "object",
+      properties: {
+        source: { type: "string", description: "Bundle source string." },
+        prefix: { type: "string", description: "Optional prefix for the exposed tool names." },
+      },
+      required: ["source"],
+    },
+    async execute(_id, params) {
+      try {
+        const r = await convertToPiPackage(params.source, { prefix: params.prefix, log: () => {} });
+        return {
+          content: [{
+            type: "text",
+            text: [
+              "converted " + params.source + " into " + r.name,
+              "  package: " + r.dir,
+              "  tools: " + (r.tools.length ? r.tools.join(", ") : "none"),
+              "  commands: " + (r.commands.length ? r.commands.join(", ") : "none"),
+              r.installed
+                ? "  registered with pi: reload the session (or restart) to see it in plugin settings"
+                : "  NOT registered with pi: " + r.note,
+            ].join("\n"),
+          }],
+          details: { bridge: "dsh-convert", dir: r.dir },
+        };
+      } catch (e) {
+        return { content: [{ type: "text", text: "dsh_convert failed: " + message(e) }], details: { error: true } };
       }
     },
   });

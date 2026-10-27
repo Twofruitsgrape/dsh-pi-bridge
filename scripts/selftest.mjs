@@ -1211,6 +1211,20 @@ async function main () {
     check('an install that did produce tools still says so', /callable in this session immediately/.test(one), one.slice(0, 200))
   }
 
+  console.log('converting a DSH bundle into a pi package')
+  {
+    const { manifestFor, slugOf, extensionSource, convertedRoot } = await import('../src/convert.js')
+    check('a scoped name becomes a safe directory', slugOf('@scope/Some Name') === 'scope-some-name', slugOf('@scope/Some Name'))
+    const m = manifestFor({ name: '@x/y', version: '1.2.3' }, 'x-y')
+    check('the generated package declares itself a pi package', m.keywords.includes('pi-package'), JSON.stringify(m.keywords))
+    check('it declares an extensions entry so pi can toggle it', m.pi && m.pi.extensions[0] === './extensions', JSON.stringify(m.pi))
+    check('it keeps the bundle version', m.version === '1.2.3', m.version)
+    const src = extensionSource({ bundleName: 'x', prefix: 'p', bridgeRoot: '/bridge', source: 'npm:x' })
+    check('the extension imports the bridge by absolute url', /file:\/\/\//.test(src) && src.includes('/src/load.js'), src.slice(0, 160))
+    check('it loads the copy inside the package, not a cache path', src.includes("'..', 'bundle'"), src.split('\n').find((l) => l.includes('BUNDLE')) || '')
+    check('converted packages live outside the bridge itself', !convertedRoot({ USERPROFILE: '/h', HOME: '/h' }).includes('dsh-pi-bridge'), convertedRoot({ USERPROFILE: '/h', HOME: '/h' }))
+  }
+
   console.log('a daemon that cannot start says why, in seconds')
   {
     const { spawn: spawnProc } = await import('node:child_process')
