@@ -1179,6 +1179,13 @@ async function main () {
     check('host module roots include the package own node_modules', cliRoots.some((r) => r.replace(/\\/g, '/').includes('@deepseek-ai/dsh')), JSON.stringify(cliRoots))
     const electronRoots = hostModulesRoots('/app/App.exe', '')
     check('host module roots still cover the Electron layout', electronRoots.some((r) => /resources[\\/]app[\\/]dsh/.test(r)), JSON.stringify(electronRoots))
+
+    // The supplied host must be a child process, not a second application. `web`
+    // boots DSH's web app, which binds 3080 and opens a browser - measured, and
+    // exactly the interference this is supposed to avoid.
+    const sup = await import('../src/dsh-supervisor.js')
+    check('the supplied host uses a template that binds no port', sup.TEMPLATE === 'sdk', sup.TEMPLATE)
+    check('the supplied host never reuses a shipped profile name', !['web', 'sdk', 'acp', 'cmdline'].includes(sup.PROFILE), sup.PROFILE)
   }
 
   console.log('a daemon that cannot start says why, in seconds')

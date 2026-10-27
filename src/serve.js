@@ -30,6 +30,27 @@ const BRIDGE_VERSION = buildFingerprint(path.resolve(HERE, '..'))
 export function startDshServer (port, handlers) {
   if (!port || !Number.isFinite(port)) return null
   const held = new Map()
+
+  /*
+   * Exit when the process that started this host is gone.
+   *
+   * A DSH started to serve one pi is worthless without that pi, and leaving it
+   * running would hold a port and a profile for nobody. Relying on stdin closing
+   * was measured and did not work: the SDK runtime keeps running after its parent
+   * exits, so the orphan check has to be explicit. `kill(pid, 0)` asks whether the
+   * pid exists without signalling it; EPERM means it exists but belongs to
+   * someone else, which still counts as alive.
+   */
+  const parentPid = Number(process.env.DSH_PI_BRIDGE_PARENT_PID || 0)
+  if (Number.isFinite(parentPid) && parentPid > 0) {
+    const timer = setInterval(() => {
+      try { process.kill(parentPid, 0) } catch (e) {
+        if (e && e.code !== 'EPERM') process.exit(0)
+      }
+    }, 2000)
+    timer.unref()
+  }
+
   const server = createServer((req, res) => {
     let raw = ''
     req.on('data', (c) => { raw += c })

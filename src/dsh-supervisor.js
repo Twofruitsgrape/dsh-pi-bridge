@@ -11,15 +11,20 @@
  * bundles` list composes one patch layer per bundle, and a profile booted with
  * DSH_PI_BRIDGE_DSH_SERVE answers /health in about three seconds. So the whole
  * job is: make sure a runtime exists, make sure one profile has the bridge in it,
- * start it detached with that variable set, and wait for the endpoint.
+ * start it with that variable set, and wait for the endpoint.
+ *
+ * What this host must NOT be is a second application. It is a child process of
+ * the pi that needs it: the `sdk` template binds no port, opens no browser, and
+ * exits with its stdin, so a pi user gets DSH plugin support without a DSH of
+ * their own being involved, and nothing of ours is left running afterwards.
  *
  * Two details are load-bearing and were found the hard way:
  *   - `dsh plugin add` leaves node_modules empty when the source is a `link:` on
  *     another drive, and the plugin manager then fails to resolve the bundle. The
  *     bridge is already on disk, so a junction into the profile is both simpler
  *     and truer than making pnpm agree.
- *   - a dedicated profile name (`pi-host`) is created from the shipped `web`
- *     template, so a user's own profile is never written to.
+ *   - a dedicated profile name (`pi-host`) is created from a shipped template, so
+ *     a user's own profile is never written to.
  *
  * @module src/dsh-supervisor.js
  */
@@ -36,11 +41,21 @@ const BRIDGE_ROOT = path.resolve(HERE, '..')
 
 /** A profile of its own, so no user profile is ever modified. */
 export const PROFILE = 'pi-host'
-/** The shipped template it is created from. */
-export const TEMPLATE = 'web'
+/**
+ * The shipped template it is created from.
+ *
+ * `web` was the first choice and was wrong: it boots DSH's web app, which binds
+ * 127.0.0.1:3080. A pi user who also runs DSH would then have two things claiming
+ * one port, which is exactly the interference this feature exists to avoid.
+ * Measured on `sdk` instead - it serves DSH clients over stdio JSON-RPC, so it
+ * binds nothing, opens no browser, and the only listener in the process is the
+ * bridge's own loopback endpoint.
+ */
+export const TEMPLATE = 'sdk'
 
 let starting = null
 let child = null
+let exitHook = false
 
 /**
  * Where a provisioned DSH keeps its own home, separate from a user's.
@@ -98,11 +113,27 @@ export async function ensureProfile (runtime, options = {}) {
   const home = dshHomeDir(env)
   const profileDir = path.join(home, 'profiles', PROFILE)
   const pkgFile = path.join(profileDir, 'package.json')
+  const marker = path.join(profileDir, '.template')
 
-  if (!existsSync(pkgFile)) {
-    log('creating DSH profile ' + PROFILE + ' from the ' + TEMPLATE + ' template')
+  /*
+   * Which template built this profile has to be on record, because it decides
+   * what the host does to the machine around it. A `web` profile binds port 3080
+   * and opens a browser - both unacceptable for something a pi starts on its own
+   * behalf - while `sdk` binds nothing. An existing profile from an older
+   * template therefore has to be rebuilt, not adopted: the package.json looks
+   * identical either way, so only a marker can tell them apart.
+   */
+  let built = ''
+  if (existsSync(pkgFile)) {
+    try { built = (await readFile(marker, 'utf8')).trim() } catch { built = 'web' }
+  }
+  if (built !== TEMPLATE) {
+    if (built) log('rebuilding profile ' + PROFILE + ' from the ' + TEMPLATE + ' template (it was ' + built + ')')
+    else log('creating DSH profile ' + PROFILE + ' from the ' + TEMPLATE + ' template')
+    await rm(profileDir, { recursive: true, force: true })
     // --dump-config composes the profile without booting an app or serving anything.
     await runToCompletion(runtime, ['--profile', PROFILE, '--from-default-profile', TEMPLATE, '--dump-config'], { DSH_HOME: home })
+    await writeFile(marker, TEMPLATE, 'utf8')
   }
 
   const pkg = JSON.parse(await readFile(pkgFile, 'utf8'))
@@ -155,16 +186,31 @@ export async function ensureDshHost (options = {}) {
     const home = dshHomeDir(env)
     await ensureProfile(runtime, { env, log, bridgeRoot: options.bridgeRoot })
 
-    // Detached: the host has to outlive the tool call that started it, exactly as
-    // the pi daemon outlives the DSH call that started it.
-    child = spawn(runtime.command, [...runtime.args, '--profile', PROFILE, '--no-open'], {
-      env: { ...process.env, ...env, DSH_HOME: home, DSH_PI_BRIDGE_DSH_SERVE: String(port) },
-      stdio: 'ignore',
-      detached: true,
+    // Stdin is a pipe we deliberately keep open: the SDK runtime exits when its
+    // client disconnects, so holding the pipe is what makes it stay. That also
+    // gives exactly the lifetime this should have - the host lives as long as the
+    // pi that started it, and nothing is left behind when pi goes away.
+    child = spawn(runtime.command, [...runtime.args, '--profile', PROFILE], {
+      env: {
+        ...process.env,
+        ...env,
+        DSH_HOME: home,
+        DSH_PI_BRIDGE_DSH_SERVE: String(port),
+        // The host watches this pid and exits when it disappears, so a pi that
+        // crashes or is killed does not leave a DSH holding the port.
+        DSH_PI_BRIDGE_PARENT_PID: String(process.pid),
+      },
+      stdio: ['pipe', 'ignore', 'ignore'],
       windowsHide: true,
       shell: /\.(cmd|bat)$/i.test(runtime.command),
     })
     child.unref()
+    // The parent's own exit closes the account: a normal exit kills the child
+    // synchronously, so quitting pi cannot leave a DSH behind holding a port.
+    if (!exitHook) {
+      exitHook = true
+      process.on('exit', () => { try { if (child) child.kill() } catch { /* already gone */ } })
+    }
     const pidFile = path.join(home, 'host.pid')
     await mkdir(home, { recursive: true })
     await writeFile(pidFile, String(child.pid || ''), 'utf8')
@@ -188,6 +234,12 @@ export async function ensureDshHost (options = {}) {
 export async function stopDshHost (options = {}) {
   const env = options.env || process.env
   const home = dshHomeDir(env)
+  // Closing stdin is the graceful path: the SDK runtime treats it as the client
+  // leaving. The kill covers a host that is not reading its pipe.
+  if (child) {
+    try { child.stdin.end() } catch { /* already gone */ }
+    try { child.kill() } catch { /* already gone */ }
+  }
   try {
     const pid = Number(await readFile(path.join(home, 'host.pid'), 'utf8'))
     if (Number.isFinite(pid) && pid > 0) process.kill(pid)

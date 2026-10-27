@@ -139,11 +139,23 @@ bridged <bundle> (via a DSH this bridge started) as dsh-introspect-fixture@1.0.0
 
 `@deepseek-ai/dsh` is an installable CLI, so the missing host is provisioned the
 same way pi is, into `~/.dsh-pi-bridge/vendor`. A profile of its own (`pi-host`,
-created from a shipped template, so no existing profile is touched) gets the
-bridge mounted as a bundle, and it is started detached with
-`DSH_PI_BRIDGE_DSH_SERVE` pointing at the loopback port the pi side already knows
-how to talk to - measured at about three seconds from spawn to `/health`. If a
-DSH is already serving, it is reused rather than duplicated.
+created from the shipped `sdk` template, so no existing profile is touched) gets
+the bridge mounted as a bundle and is started with `DSH_PI_BRIDGE_DSH_SERVE`
+pointing at the loopback port the pi side already knows how to talk to. If a DSH
+is already serving, it is reused rather than duplicated.
+
+That host is a child process, not a second application - which took two
+corrections to get right. `web` was the obvious template and is the wrong one: it
+boots DSH's web app, binding 127.0.0.1:3080 and opening a browser, so a pi user
+would find their own DSH's port taken by something they never asked to run. `sdk`
+serves DSH clients over stdio and binds nothing, so the only listener in the
+process is the bridge's own port. And because a profile is created once, a profile
+built by an older version has to be rebuilt rather than adopted - the package.json
+is identical either way, so the template is recorded in the profile and checked on
+every start.
+
+Lifetime follows from the same principle: the host ends with the pi that started
+it. Nothing of ours keeps running after pi exits, and no orphan holds the port.
 
 Two switches exist because supplying a runtime and starting a process are
 different acts: `DSH_PI_BRIDGE_NO_PROVISION=1` refuses to download,
