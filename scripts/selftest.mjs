@@ -1199,6 +1199,18 @@ async function main () {
     check('its tool survives the rewrite', (r.capabilities || []).some((c) => c.name === 'ts_param_echo'), JSON.stringify((r.capabilities || []).map((c) => c.name)))
   }
 
+  console.log('the install report only claims what happened')
+  {
+    const { formatReport } = await import('../extensions/index.js')
+    const captured = { info: { name: 'ui-only-fixture', version: '1.0.0' } }
+    const empty = { tools: [], commands: [], skills: [], events: [], skipped: [] }
+    const none = formatReport('npm:ui-only', captured, empty, 'dsh-host')
+    check('an install that produced nothing does not claim it is callable', !/callable in this session immediately/.test(none), none.split('\n').slice(0, 4).join(' | '))
+    check('it says nothing callable arrived instead', /nothing callable arrived/.test(none), none.slice(0, 200))
+    const one = formatReport('npm:has-tool', captured, { ...empty, tools: ['x_tool'] }, 'dsh-host')
+    check('an install that did produce tools still says so', /callable in this session immediately/.test(one), one.slice(0, 200))
+  }
+
   console.log('a daemon that cannot start says why, in seconds')
   {
     const { spawn: spawnProc } = await import('node:child_process')

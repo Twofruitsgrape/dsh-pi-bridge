@@ -45,7 +45,13 @@ function shortPrefix(name) {
   return s || "bridged";
 }
 
-function formatReport(spec, captured, report, mode) {
+/**
+ * The install report, as text.
+ *
+ * Exported because what it claims is the product: a bundle that produced nothing
+ * must say so, and that is easier to assert here than through a live host.
+ */
+export function formatReport(spec, captured, report, mode) {
   const lines = ["bridged " + spec + " as " + captured.info.name + "@" + captured.info.version];
   lines.push("  tools: " + (report.tools.length ? report.tools.join(", ") : "none"));
   lines.push("  commands: " + (report.commands.length ? report.commands.map((c) => "/" + c).join(", ") : "none"));
@@ -64,11 +70,17 @@ function formatReport(spec, captured, report, mode) {
     lines.push("        DSH with DSH_PI_BRIDGE_DSH_SERVE=<port> and set");
     lines.push("        DSH_PI_BRIDGE_DSH_ENDPOINT=<host>:<port> here for real forwarding.");
   } else {
-    lines.push("  bridged tools are callable in this session immediately.");
-  if (!report.tools.length && mode === "dsh-host") {
-    lines.push("  (nothing callable arrived; the bundle may register only after services it")
-    lines.push("   injects are composed in that profile, or it may be UI/configuration only)")
-  }
+    if (report.tools.length) {
+      lines.push("  bridged tools are callable in this session immediately.");
+    } else {
+      // Printed unconditionally before this, so a bundle that produced nothing -
+      // a market UI registering web routes, say - reported "tools: none" and
+      // "callable immediately" in the same breath. Measured on npm:dshmarket.
+      lines.push("  nothing callable arrived: the bundle registered no tool for a host to forward.");
+      lines.push("  a UI, settings or route-only bundle has nothing to call here; it may still be");
+      lines.push("  active inside DSH, where its own host is. A bundle that registers only after");
+      lines.push("  the services it injects are composed would look the same.");
+    }
   }
   return lines.join("\n");
 }
