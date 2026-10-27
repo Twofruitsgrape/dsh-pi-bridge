@@ -1,0 +1,23 @@
+# A bundle that uses the row features the official patches use: a subpath name,
+# a row config, a row that disables itself, and a row that declares inject.
+- insert:
+    - id: root-row
+      name: dsh-multi-row-fixture
+
+    - id: extra-row
+      name: dsh-multi-row-fixture/extra
+      inject: [tools]
+      config:
+        greeting: hello-from-config
+
+    - id: switched-off
+      name: dsh-multi-row-fixture/extra
+      disabled: true
+
+    - id: conditional
+      name: dsh-multi-row-fixture/extra
+      disabled: !!js process.platform === 'win32'
+
+- id: system-prompt
+  config:
+    personaPrefix: ignored by the bridge

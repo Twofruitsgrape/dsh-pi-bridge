@@ -85,12 +85,20 @@ check('the supplied host answers where it was asked to', !!((await dshHostStatus
 const profilePkg = JSON.parse(await readFile(path.join(dshHomeDir(), 'profiles', PROFILE, 'package.json'), 'utf8'))
 check('the profile carries the bridge as a bundle', profilePkg.dsh.profile.bundles.includes('dsh-pi-bridge'), JSON.stringify(profilePkg.dsh.profile.bundles))
 
-// And a call must reach DSH, not a stand-in.
-const forwarded = pi.tools.filter((t) => !['dsh_install', 'dsh_preview'].includes(t.name))
+// And a call must reach DSH, not a stand-in. The tool is taken from the report
+// this bridge just printed rather than from a hardcoded exclusion list: the list
+// went stale the moment a third bridge tool was added, and the suite then called
+// that tool and read its failure as a forwarding failure.
+const reportedNames = (/tools: ([^\n]+)/.exec(text)?.[1] || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter((s) => s && s !== 'none')
+const forwarded = pi.tools.filter((t) => reportedNames.includes(t.name))
+check('the report names a tool that is actually registered', forwarded.length > 0, JSON.stringify({ reportedNames, registered: pi.tools.map((t) => t.name) }))
 if (forwarded.length) {
   const res = await forwarded[0].execute('t2', {}, undefined, undefined, { ui: { notify: () => {} } })
   const body = (res && res.content && res.content[0] && res.content[0].text) || ''
-  check('a forwarded tool answers through DSH', body.length > 0 && !/^\s*$/.test(body), body.slice(0, 160))
+  check('a forwarded tool answers through DSH', body.length > 0 && !/failed/.test(body), body.slice(0, 160))
   check('the answer is marked as coming from DSH', !!(res && res.details && res.details.viaDsh), JSON.stringify(res && res.details).slice(0, 120))
 }
 

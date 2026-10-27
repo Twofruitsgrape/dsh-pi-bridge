@@ -18,10 +18,11 @@ import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { resolve as resolveSource, installDependencies, PACKAGES_DIR, CACHE_ROOT } from './resolve.js'
-import { classify, exists, piEntries, walk, dshEntry } from './manifest.js'
+import { classify, exists, piEntries, walk } from './manifest.js'
 import { scanImports, makeStubs, splitSpecifier, toFileUrl } from './stubs.js'
 import { emitBuild, stripAvailable } from './transpile.js'
-import { capturePi, captureDsh } from './capture.js'
+import { capturePi } from './capture.js'
+import { composeBundle } from './compose.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const SHIM_URL = toFileUrl(path.join(HERE, 'typebox-shim.js'))
@@ -134,12 +135,10 @@ export async function loadForeign (spec, options) {
   let captured
   const skillDirs = []
   if (host === 'dsh') {
-    const entry = await dshEntry(mirror, info.pkg)
-    if (entry) {
-      captured = await captureDsh(redirect(entry, mirror, compiled), info.name, configFor(info.pkg))
-    } else {
-      captured = { capabilities: [], events: [], unsupported: [], errors: ['no DSH entry module found in package'] }
-    }
+    // A DSH plugin is a row in the bundle patch, not the package entry point:
+    // composing row by row is what honours a subpath name, a row config and a
+    // row that disables itself.
+    captured = await composeBundle(mirror, info, { compiled, log, redirect })
   } else {
     const entries = await piEntries(mirror, info.pkg)
     // A compiled .ts and its emitted .mjs can both be discovered; loading the
@@ -224,10 +223,6 @@ async function compileTypeScript (mirror, sources, log) {
   const { emitted, failures } = await emitBuild(mirror, mirror, ts)
   if (failures.length) log('TypeScript: ' + failures.length + ' file(s) could not be compiled')
   return { emitted, failures }
-}
-
-function configFor (pkg) {
-  try { return (pkg && pkg.dsh && pkg.dsh.config) || {} } catch { return {} }
 }
 
 export { KNOWN_HOST_PACKAGES, stat }

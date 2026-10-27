@@ -1225,6 +1225,57 @@ async function main () {
     check('converted packages live outside the bridge itself', !convertedRoot({ USERPROFILE: '/h', HOME: '/h' }).includes('dsh-pi-bridge'), convertedRoot({ USERPROFILE: '/h', HOME: '/h' }))
   }
 
+  console.log('reading the official bundle patch: rows, not one entry module')
+  {
+    const { parsePatch, rowModulePath, rowActivity, normaliseInject } = await import('../src/patch-rows.js')
+    const dir = path.join(ROOT, 'scripts', 'fixtures', 'dsh-multi-row')
+    const text = await readFile(path.join(dir, 'cordis.patch.yml'), 'utf8')
+    const p = parsePatch(text)
+    check('insert rows are read with their id', p.rows.length === 4 && p.rows[0].id === 'root-row', JSON.stringify(p.rows.map((r) => r.id)))
+    check('a row inject is read as a list', JSON.stringify(p.rows[1].inject) === '["tools"]', JSON.stringify(p.rows[1].inject))
+    check('a block-scalar-free row config is read', !!p.rows[1].config && p.rows[1].config.greeting === 'hello-from-config', JSON.stringify(p.rows[1].config))
+    check('disabled: true is a decision, so the row is not composed', rowActivity(p.rows[2]).active === false)
+    check('a !!js expression is reported rather than evaluated', rowActivity(p.rows[3]).active === true && /conditional/.test(rowActivity(p.rows[3]).reason || ''), JSON.stringify(rowActivity(p.rows[3])))
+    check('modify operations are reported apart from rows', p.modifies.some((m) => m.id === 'system-prompt'), JSON.stringify(p.modifies))
+    check('an empty patch yields no rows and no error', parsePatch('[]').rows.length === 0)
+    check('inject accepts a lone scalar too', JSON.stringify(normaliseInject('a')) === '["a"]', JSON.stringify(normaliseInject('a')))
+
+    const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8'))
+    const sub = rowModulePath(dir, pkg, 'dsh-multi-row-fixture/extra')
+    check('a subpath row resolves through the exports map', !!sub && /extra\.js$/.test(sub), sub)
+    check('the root name is not treated as a subpath', rowModulePath(dir, pkg, 'dsh-multi-row-fixture') === null)
+    check('a foreign package name is never resolved inside this bundle', rowModulePath(dir, pkg, 'other-package') === null)
+  }
+
+  console.log('composing a bundle row by row')
+  {
+    const { composeBundle } = await import('../src/compose.js')
+    const dir = path.join(ROOT, 'scripts', 'fixtures', 'dsh-multi-row')
+    const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8'))
+    const out = await composeBundle(dir, { name: 'dsh-multi-row-fixture', pkg }, { log: () => {} })
+    check('the disabled row is not mounted', out.rows.find((r) => r.id === 'switched-off').mounted === false, JSON.stringify(out.rows))
+    check('every other row is mounted', out.rows.filter((r) => r.mounted).length === 3, JSON.stringify(out.rows))
+    check('the subpath row contributed its own tool', out.capabilities.some((c) => c.name === 'extra_tool_hello_from_config'), JSON.stringify(out.capabilities.map((c) => c.name)))
+    check('the row config reached apply()', out.capabilities.some((c) => /hello_from_config/.test(c.name)), JSON.stringify(out.capabilities.map((c) => c.name)))
+    check('a patch that also edits host rows says so', out.notes.some((n) => /system-prompt/.test(n)), JSON.stringify(out.notes))
+  }
+
+  console.log('parameter schemas as each host compiles them')
+  {
+    const { toToolSpec, specToJsonSchema, toToolSchema } = await import('../src/schema.js')
+    const nested = toToolSpec({ type: 'object', properties: { config: { type: 'object', properties: { mode: { type: 'string' } } } } })
+    check('a nested object carries additionalProperties, which DSH requires', nested.config.additionalProperties === true, JSON.stringify(nested.config))
+    const inArray = toToolSpec({ type: 'object', properties: { list: { type: 'array', items: { type: 'object', properties: { a: { type: 'string' } } } } } })
+    check('an object inside an array carries it too', inArray.list.items.additionalProperties === true, JSON.stringify(inArray.list))
+    const nullable = toToolSpec({ type: 'object', properties: { v: { type: ['string', 'null'] } } })
+    check('a nullable scalar becomes a oneOf both hosts express', JSON.stringify(nullable.v) === '{"oneOf":[{"type":"string"},{"type":"null"}]}', JSON.stringify(nullable.v))
+    check('required stays a per-property marker', nullable.v.required === undefined)
+    const back = specToJsonSchema({ v: { oneOf: [{ type: 'string' }, { type: 'number' }] }, z: { type: 'null' } })
+    check('oneOf crosses to pi without a fabricated type', back.properties.v.type === undefined && Array.isArray(back.properties.v.oneOf), JSON.stringify(back.properties.v))
+    check('null stays null instead of becoming any', back.properties.z.type === 'null', JSON.stringify(back.properties.z))
+    check('a spec map is not mistaken for JSON Schema', toToolSchema({ v: { type: 'string', required: true } }).properties.v.type === 'string', JSON.stringify(toToolSchema({ v: { type: 'string', required: true } })))
+  }
+
   console.log('adopting DSH packages that were installed as ordinary pi packages')
   {
     const { needsAdapter, entryDir, ADAPTER_DIR } = await import('../src/adopt.js')
