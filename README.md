@@ -174,6 +174,41 @@ because they only surface on a real boot: the shape a host accepts for a schema,
 which files must be published, that analysing a bundle starts no process and
 binds no port.
 
+### Tested versions
+
+Both hosts are developer previews and both move fast, so the only honest claim is
+a pinned pair - not "works with pi and DSH". This is the window everything above
+was run in:
+
+| | Version |
+|---|---|
+| node | 22.22.2 (`engines` also allows >=24) |
+| pi | 1.4.0 - `@earendil-works/pi-coding-agent`, entry `dist/bundle/cli.js` |
+| DSH | 0.2.1-rc.3 - DeepSeek Harness desktop, runtime unpacked at `resources/app` |
+| OS | Windows x64 |
+
+The DSH row is not incidental: 0.2.1-rc.3 moved the runtime out of `app.asar`, and
+until the module rewriter learned the unpacked root, every bare `@deepseek-ai/*`
+import from a bundle resolved to nothing. A different pair is untested rather than
+unsupported, and `bridge_status --verbose` reports the build actually running.
+
+Beyond the suites, both directions were measured over a corpus of real published
+packages, at bridge build `4edbe63d6770` (the module-byte fingerprint described in
+`src/build-id.js`):
+
+- **pi -> DSH: 166 of 200** packages produced a capability that was then actually
+  called. Two further fixes landed after the batch and were each verified on the
+  five packages they unblocked, so this is not one continuous re-run.
+- **DSH -> pi: 45 of 50** bundles produced capabilities - 33 with tools, 12 with
+  commands only. Of the five that produced nothing, two were the package's own
+  defect; three are unconfirmed and suspected to be pure-hook bundles.
+
+Neither number has been re-measured since. The current build is `177a4e438f2f`,
+which differs from the measured one in how the pi runtime is located (see
+"When only one host is installed") - a change that cannot in principle alter which
+packages load, but that is a reason to re-run, not a substitute for it. Re-running
+is `node tools/batch-pi-to-dsh.mjs <list.json>` against a live host.
+
 ## What does not cross
 
 The bridge reports these instead of failing quietly:
