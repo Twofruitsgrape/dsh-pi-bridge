@@ -58,8 +58,17 @@ const REQUIRED = [
  */
 const RUNTIME_TREES = ['src']
 
-/** Measurement scaffolding and local state: never published. */
-const DEV_ONLY = ['.workbuddy', '.tmp', 'tools/batch-pi-to-dsh.mjs', 'tools/batch-dsh-to-pi.mjs', 'tools/batch-pi-side.mjs']
+/**
+ * Measurement scaffolding and local state: never published.
+ *
+ * market-submission.yml belongs here for a reason worth writing down: it contains
+ * the text "// trap" and nothing else, it is excluded by .npmignore, and no code
+ * references it. It looks like a marketplace manifest awaiting content, which is
+ * precisely how it was misread once - a filename and a byte count were treated as
+ * evidence of a missing deliverable. Asserting it stays out of the tarball is the
+ * only claim about it that can be made from the repository.
+ */
+const DEV_ONLY = ['.workbuddy', '.tmp', 'market-submission.yml', 'tools/batch-pi-to-dsh.mjs', 'tools/batch-dsh-to-pi.mjs', 'tools/batch-pi-side.mjs']
 
 async function listFiles (dir, prefix = '') {
   const out = []
