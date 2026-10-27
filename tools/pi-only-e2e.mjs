@@ -100,6 +100,12 @@ if (forwarded.length) {
   const body = (res && res.content && res.content[0] && res.content[0].text) || ''
   check('a forwarded tool answers through DSH', body.length > 0 && !/failed/.test(body), body.slice(0, 160))
   check('the answer is marked as coming from DSH', !!(res && res.details && res.details.viaDsh), JSON.stringify(res && res.details).slice(0, 120))
+
+  // Faithfulness, not reachability: the call has to enter DSH's tool registry so
+  // the plugin's own pre/post policies and content finalisation run. A raw
+  // `def.execute` answers too, and would pass every check above.
+  const health = await dshHostStatus({ endpoint: { host: '127.0.0.1', port: PORT } })
+  check('calls from pi go through the DSH tools registry', !!health && health.callPath === 'registry', JSON.stringify(health).slice(0, 180))
 }
 
 // Reuse: a second call must not start a second host.

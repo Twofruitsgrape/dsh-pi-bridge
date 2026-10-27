@@ -207,7 +207,51 @@ Only a handful of these have a pi analogue. This is why the bridge forwards to a
 `sessions` or `slots` is not "mostly working" against stand-ins, it is a
 different program. See `README.md` for what that costs on each side.
 
-## 4. What this means for the project
+## 4. What "complete" means, field by field
+
+"Installed" and "translated" are different claims. A plugin is translated
+completely when every declarative field it made a promise with survives the trip.
+This is the whole list for a tool, taken from the two type files.
+
+| DSH | pi | Status |
+|---|---|---|
+| `name`, `description` | same | exact |
+| `parameters` (property map) | JSON Schema | exact, including `null`, `oneOf`, `const`, and the mandatory `additionalProperties` |
+| `output.schema` | `outputSchema` + `structuredContent` | exact: a programmatic caller gets the value, not prose |
+| `deferLoading` | `exposure: "deferred"` | exact |
+| `isConcurrencySafe(args)` | `executionMode: "sequential"` | conservative: pi's mode is static, so a declared classifier maps to the only always-true claim |
+| `timeoutMs` | none | DSH still enforces its own budget inside the registry; the value rides along for display |
+| `execute(args, exec)` | `execute(callId, params, signal, onUpdate, ctx)` | exact, with the caller's signal propagated |
+| `projectContent`, `finalizeContent` | applied inside DSH | exact, once calls go through `ctx.tools.execute` |
+| `presentCall`, `presentResult`, `presentationMeta` | none | **not translatable**: pi renders with TUI components, DSH with presentation metadata |
+| `inject` services (`llm`, `sessions`, `agents`, …) | none | irrelevant in practice: the plugin runs inside a real DSH, so they are real, not stubbed |
+
+The last row is the one worth pausing on. Forwarding to a live host is what makes
+"complete" achievable at all: the plugin's own view of the world - `ctx.llm`,
+sessions, the skill registry, subagents - is the genuine one, because it is a
+genuine DSH. What cannot cross is the *presentation*: a plugin that draws a
+settings panel or a market page has no pi surface to draw on.
+
+### 4.1 Measured, not assumed
+
+Two of these rows were defects until they were measured:
+
+- Calls from pi reached `def.execute` directly, which skips pre-policy, guards,
+  post-policy and the tool's own `finalizeContent`. The registry method
+  `ctx.tools.execute(input)` is the documented entry point and runs all of them -
+  visible at `dsh-tools/lib/index.js:3212` versus the raw body call at `:3406`.
+  Forwarding now uses the registry, and `/health` reports `callPath` so a caller
+  can assert it got the faithful path instead of merely an answer.
+- `ToolExecutionInput.signal` is required. Omitting it makes the registry read
+  `undefined.aborted` and fail the call before the tool body runs, which is how
+  the requirement was found.
+
+The pi→DSH direction had the mirror-image defect: every pi tool crossed into DSH
+through a fixed `{ ok, result }` text envelope, so a tool that declared an
+`outputSchema` lost its structure the moment it was bridged. It now keeps its own
+output schema, and the canonical value crosses unchanged.
+
+## 5. What this means for the project
 
 Reading the specifications changed four things, each of which was a defect
 before:

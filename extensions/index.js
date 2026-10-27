@@ -144,6 +144,10 @@ export default async function (pi) {
           description: (t.description || "(no description)") + " [dsh-pi-bridge: runs natively inside DSH from " + (loaded.name || "dsh") + "]",
           promptSnippet: t.description ? String(t.description).slice(0, 120) : undefined,
           parameters: dshParamsToSchema(t.parameters),
+          // The rest of the contract crosses the boundary too; see dsh-loader.
+          outputSchema: t.outputSchema,
+          exposure: t.deferred ? "deferred" : undefined,
+          executionMode: t.sequentialOnly ? "sequential" : undefined,
           async execute(_id, params) {
             const res = await dshHostCall(t.name, params || {});
             if (!res || !res.ok) {
@@ -152,7 +156,17 @@ export default async function (pi) {
             // DSH's defineTool contract returns { ok, result }; unwrap it.
             const payload = res.result && typeof res.result === "object" && res.result.result !== undefined ? res.result : { result: res.result };
             const text = typeof payload.result === "string" ? payload.result : JSON.stringify(payload.result ?? payload);
-            return { content: [{ type: "text", text: (payload.ok === false ? "error: " : "") + text }], details: { viaDsh: true, tool: t.name } };
+            // When DSH returned final content it has already been through the
+            // tool's own finalizeContent and post-execute policy. Re-deriving
+            // text from the value would discard exactly the transformation the
+            // plugin applied, so the content blocks cross as they are.
+            const blocks = Array.isArray(res.content) ? res.content.filter((b) => b && typeof b === "object") : null;
+            const out = {
+              content: blocks && blocks.length ? blocks : [{ type: "text", text: (payload.ok === false ? "error: " : "") + text }],
+              details: { viaDsh: true, tool: t.name },
+            };
+            if (t.outputSchema) out.structuredContent = res.result;
+            return out;
           },
         });
         registeredTools.add(name);

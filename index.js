@@ -126,6 +126,20 @@ function message (e) {
   return e && e.message ? String(e.message).slice(0, 400) : String(e)
 }
 
+/**
+ * A registry failure, as one line a pi user can act on.
+ *
+ * `ToolFailure` is a structured shape rather than an Error, and its message is
+ * the only part the far side can use; anything else would cross the boundary as
+ * an object pi has no rendering for.
+ */
+function describeFailure (failure) {
+  if (!failure) return 'the tool failed without a reason'
+  if (typeof failure === 'string') return failure.slice(0, 300)
+  const text = failure.message || failure.reason || failure.code || failure.name
+  return String(text === undefined ? JSON.stringify(failure) : text).slice(0, 300)
+}
+
 function formatReport (spec, info, report) {
   const lines = ['bridged ' + spec + ((info && info.name) ? ' as ' + info.name + '@' + info.version : '')]
   lines.push('  mode: package code runs natively inside a supervised pi process')
@@ -700,34 +714,64 @@ export async function apply (ctx, config) {
         const entry = hostCallable.get(name)
         if (!entry) return { ok: false, error: 'not loaded in this DSH session: ' + name }
         if (typeof entry.def.execute !== 'function') return { ok: false, error: 'tool has no execute' }
+        const callId = 'dsh-pi-bridge:' + name + ':' + Date.now().toString(36)
+        // Prefer the registry over the raw definition. `ctx.tools.execute`
+        // runs pre-policy, guards, around-dispatch, post-policy and the tool's
+        // own finalizeContent; `def.execute` runs the body and nothing else, so
+        // a plugin that rewrites its result content produced different output
+        // here than it does inside DSH. Measured: the registry method is the
+        // documented entry point and forwards to `tool.execute(args, exec)`
+        // only after those stages.
+        const registry = ctx && ctx.tools && typeof ctx.tools.execute === 'function' ? ctx.tools : null
+        // A call from the far side has no agent turn behind it, so the only
+        // cancellation that exists is ours: a signal this process owns, plus the
+        // budget. `signal` is required by ToolExecutionInput - omitting it makes
+        // the registry read `undefined.aborted` and fail the call before the tool
+        // body runs, which is how this was found.
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 120000)
         try {
-          // The host hands a tool an execution context (callId, signal, and the
-          // calling agent's scope). A remote HTTP call has no agent turn behind it,
-          // and agent must not be fabricated: a tool that dispatches subagents or
-          // writes session state under a fake identity is worse than one that
-          // refuses. So this carries what is genuinely available - an identity for
-          // the call and a real abort signal - and leaves agent undefined, so a
-          // tool's own guard produces its own clear message ('requires a live DSH
-          // agent', measured) instead of a TypeError from reading exec.signal.
-          const controller = new AbortController()
+          if (registry) {
+            const outcome = await registry.execute({
+              callId,
+              name,
+              arguments: args || {},
+              signal: controller.signal,
+            })
+            if (outcome && outcome.isError) {
+              return { ok: false, error: describeFailure(outcome.error), content: outcome.content }
+            }
+            return { ok: true, result: outcome && outcome.value, content: outcome && outcome.content }
+          }
+          // Older hosts without the registry method: the raw body, with the
+          // execution context a tool may read. agent stays undefined on purpose -
+          // a tool that dispatches subagents or writes session state under a
+          // fabricated identity is worse than one that refuses with its own
+          // message ('requires a live DSH agent', measured).
           const exec = {
-            callId: 'dsh-pi-bridge:' + name + ':' + Date.now().toString(36),
+            callId,
             name,
             arguments: args || {},
             signal: controller.signal,
             agent: undefined,
           }
-          const timer = setTimeout(() => controller.abort(), 120000)
-          let out
-          try { out = await entry.def.execute(args || {}, exec) }
-          finally { clearTimeout(timer) }
+          const out = await entry.def.execute(args || {}, exec)
           return { ok: true, result: out }
         } catch (e) {
           return { ok: false, error: String((e && e.message) || e).slice(0, 300) }
+        } finally {
+          clearTimeout(timer)
         }
       },
     }
-    const srv = startDshServer(servePort, handlers)
+    const srv = startDshServer(servePort, {
+      ...handlers,
+      // How forwarding is wired, so a caller can check it got the faithful path
+      // rather than merely an answer. See the `call` handler above.
+      meta: () => ({
+        callPath: ctx && ctx.tools && typeof ctx.tools.execute === 'function' ? 'registry' : 'raw-definition',
+      }),
+    })
     if (srv) log('dsh-pi-bridge serving DSH plugins on 127.0.0.1:' + servePort)
     else log('dsh-pi-serve not started (port ' + servePort + ' unavailable)')
     ctx.tools.register(tool({
@@ -738,8 +782,13 @@ export async function apply (ctx, config) {
       execute: guarded(async (args) => {
         const exposed = handlers.list()
         const names = (exposed || []).map((x) => (x && x.name) || String(x))
-        if (args && args.verbose) return JSON.stringify({ port: servePort, exposed }, null, 1)
-        return JSON.stringify({ port: servePort, tools: names }, null, 1)
+        // Whether calls from the far side go through the tools registry or fall
+        // back to the raw definition body. The registry path applies the
+        // plugin's own content policies; the fallback does not, so this is the
+        // one field that says how faithful the forwarding currently is.
+        const callPath = ctx && ctx.tools && typeof ctx.tools.execute === 'function' ? 'registry' : 'raw-definition'
+        if (args && args.verbose) return JSON.stringify({ port: servePort, callPath, exposed }, null, 1)
+        return JSON.stringify({ port: servePort, callPath, tools: names }, null, 1)
       }),
     }))
   }

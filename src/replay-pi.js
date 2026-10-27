@@ -35,12 +35,24 @@ export function replayIntoPi (pi, captured, options) {
           description: (cap.description || '(no description)') + ' [bridged by dsh-pi-bridge from ' + (cap.origin || 'dsh') + ']',
           promptSnippet: cap.description ? String(cap.description).slice(0, 120) : undefined,
           parameters: cap.schema,
+          // Declared only when the source declared one: pi uses it to hand
+          // programmatic callers structured data instead of prose.
+          outputSchema: cap.outputSchema,
+          // The bundle asked for deferred loading; keeping it undeclared would
+          // put every tool of a large bundle into the model's context.
+          exposure: cap.deferred ? 'deferred' : undefined,
+          // The bundle ships a per-call concurrency classifier. pi's execution
+          // mode is static, so the only claim that is always true is the
+          // conservative one: run one at a time.
+          executionMode: cap.sequentialOnly ? 'sequential' : undefined,
           async execute (_toolCallId, params, signal, _onUpdate, ctx) {
             const out = await cap.run(params, { signal, ctx })
-            return {
+            const result = {
               content: [{ type: 'text', text: out.text || JSON.stringify(out.structured === undefined ? null : out.structured) }, ...out.images],
-              details: { bridge: true, origin: cap.origin, name },
+              details: { bridge: true, origin: cap.origin, name, timeoutMs: cap.timeoutMs },
             }
+            if (cap.outputSchema && out.structured !== undefined && out.structured !== null) result.structuredContent = out.structured
+            return result
           },
         })
         report.tools.push(name)

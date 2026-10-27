@@ -63,7 +63,12 @@ export function startDshServer (port, handlers) {
           // session outlives edits to the installed copy just as the pi daemon
           // does, and measuring through one that predates the change silently
           // reports the previous build's behaviour - twice now, once on each side.
-          return send({ ok: true, pid: process.pid, serve: true, tools: handlers.list().length, bridgeVersion: BRIDGE_VERSION })
+          //
+          // `meta` lets the host add facts about how it is wired - which call
+          // path forwarding uses, for instance - so a caller can assert the
+          // faithful path instead of only that something answered.
+          const extra = typeof handlers.meta === 'function' ? handlers.meta() : {}
+          return send({ ok: true, pid: process.pid, serve: true, tools: handlers.list().length, bridgeVersion: BRIDGE_VERSION, ...extra })
         }
         if (url === '/tools') return send({ ok: true, tools: handlers.list() })
         const body = raw ? JSON.parse(raw) : {}

@@ -13,7 +13,7 @@
  *
  * @module src/capture.js
  */
-import { toToolSchema, toToolSpec } from './schema.js'
+import { toToolSchema, toToolSpec, specNodeToJsonSchema } from './schema.js'
 import { projectResult } from './capabilities.js'
 
 /**
@@ -22,7 +22,7 @@ import { projectResult } from './capabilities.js'
  * @param {string} origin
  * @param {'pi'|'dsh'} sourceHost the calling convention to adapt from
  */
-function makeTool (raw, origin, sourceHost) {
+export function makeTool (raw, origin, sourceHost) {
   const schema = toToolSchema(raw.parameters)
   const spec = toToolSpec(raw.parameters)
   const name = String(raw.name || 'unnamed_tool')
@@ -33,6 +33,28 @@ function makeTool (raw, origin, sourceHost) {
     description: String(raw.description || ''),
     schema,
     spec,
+    // The rest of the official tool contract. Dropping these is what turns a
+    // faithful bridge into a lossy one: without the output schema a programmatic
+    // caller receives text where the plugin promised data, without deferLoading a
+    // large bundle is declared to the model in full, and without the concurrency
+    // classifier pi may run siblings in parallel that the plugin said it cannot
+    // survive.
+    // The output schema is spelled differently by each host: DSH nests a
+    // ValueSchemaSpec under `output.schema`, pi declares JSON Schema directly as
+    // `outputSchema`. Reading only one of them made the reverse direction look
+    // like it had no output schema at all, and every pi tool then crossed into
+    // DSH through the text envelope.
+    outputSchema: raw.output && raw.output.schema
+      ? specNodeToJsonSchema(raw.output.schema)
+      : (raw.outputSchema && typeof raw.outputSchema === 'object' ? raw.outputSchema : undefined),
+    // Both hosts say "do not put this in the model's context up front", with
+    // different spellings: DSH `deferLoading`, pi `exposure: 'deferred'`.
+    deferred: raw.deferLoading === true || raw.exposure === 'deferred',
+    // And both say "this cannot run beside a sibling", again differently: DSH
+    // ships a per-call classifier, pi a static execution mode. The semantic that
+    // survives the trip is the conservative one.
+    sequentialOnly: typeof raw.isConcurrencySafe === 'function' || raw.executionMode === 'sequential',
+    timeoutMs: typeof raw.timeoutMs === 'number' ? raw.timeoutMs : undefined,
     origin,
     run: async (args, ctx) => {
       if (typeof raw.execute !== 'function') return projectResult({ content: [{ type: 'text', text: 'bridged tool has no execute()' }] })

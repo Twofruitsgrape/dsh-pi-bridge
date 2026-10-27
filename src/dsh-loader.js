@@ -19,6 +19,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
 import os from 'node:os'
 import { bundlePlugin } from './plugin-shape.js'
+import { specNodeToJsonSchema } from './schema.js'
 import { guardConnection } from './service-guard.js'
 
 /** Specifier families the running build supplies. */
@@ -571,10 +572,24 @@ export async function loadDshBundle (dir, ctx, opts) {
       ...(contained.length
         ? { contained, error: 'its own ' + contained[0].call + ' failed and was contained: ' + contained[0].error }
         : {}),
-      // Strip the definition before returning it across a boundary.
+      // Strip the executable definition before returning it across a boundary,
+      // but keep the declarative half of the tool contract. These four fields are
+      // what the far side needs to be faithful rather than approximate: the
+      // output schema so a programmatic caller gets data instead of prose, the
+      // defer flag so a large bundle is not declared to the model in full, the
+      // concurrency classifier so pi does not parallelise calls the plugin said
+      // it cannot survive, and the timeout so the caller can budget.
       tools: tools
         .filter((t) => !alreadyPresent.includes(t.name))
-        .map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })),
+        .map((t) => ({
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+          outputSchema: t.output && t.output.schema ? specNodeToJsonSchema(t.output.schema) : undefined,
+          deferred: t.deferLoading === true,
+          sequentialOnly: typeof t.isConcurrencySafe === 'function',
+          timeoutMs: typeof t.timeoutMs === 'number' ? t.timeoutMs : undefined,
+        })),
       reused: [...alreadyPresent],
       deferred: flags.deferred,
       conflicts,

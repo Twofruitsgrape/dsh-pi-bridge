@@ -1276,6 +1276,61 @@ async function main () {
     check('a spec map is not mistaken for JSON Schema', toToolSchema({ v: { type: 'string', required: true } }).properties.v.type === 'string', JSON.stringify(toToolSchema({ v: { type: 'string', required: true } })))
   }
 
+  console.log('the whole tool contract crosses, not just name and parameters')
+  {
+    const { makeTool } = await import('../src/capture.js')
+    const { replayIntoPi } = await import('../src/replay-pi.js')
+    const { replayIntoDsh } = await import('../src/replay-dsh.js')
+
+    const dshTool = {
+      name: 'stats',
+      description: 'returns data',
+      parameters: { text: { type: 'string', required: true } },
+      output: { schema: { type: 'object', additionalProperties: false, properties: { chars: { type: 'integer', required: true } } }, render: () => [] },
+      deferLoading: true,
+      isConcurrencySafe: () => true,
+      async execute (args) { return { chars: String(args.text).length } },
+    }
+    const fromDsh = makeTool(dshTool, 'demo', 'dsh')
+    check('a DSH output.schema becomes a JSON Schema outputSchema', !!fromDsh.outputSchema && fromDsh.outputSchema.properties.chars.type === 'integer', JSON.stringify(fromDsh.outputSchema))
+    check('DSH deferLoading becomes deferred', fromDsh.deferred === true)
+    check('a DSH concurrency classifier becomes sequentialOnly', fromDsh.sequentialOnly === true)
+
+    const pi = { tools: [] }
+    pi.registerTool = (t) => pi.tools.push(t)
+    pi.registerCommand = () => {}
+    pi.on = () => () => {}
+    replayIntoPi(pi, { capabilities: [fromDsh], events: [], skillDirs: [] }, {})
+    const registered = pi.tools[0]
+    check('pi receives the output schema', !!registered.outputSchema && registered.outputSchema.properties.chars.type === 'integer')
+    check('pi receives deferred exposure', registered.exposure === 'deferred', String(registered.exposure))
+    check('pi receives sequential execution', registered.executionMode === 'sequential', String(registered.executionMode))
+    const answer = await registered.execute('id', { text: 'abcd' }, undefined, undefined, {})
+    check('the call returns structured content, not only prose', JSON.stringify(answer.structuredContent) === '{"chars":4}', JSON.stringify(answer.structuredContent))
+
+    const piTool = {
+      name: 'report',
+      description: 'structured output',
+      parameters: { type: 'object', properties: { n: { type: 'integer' } }, required: ['n'] },
+      outputSchema: { type: 'object', additionalProperties: false, properties: { total: { type: 'number' } }, required: ['total'] },
+      executionMode: 'sequential',
+      exposure: 'deferred',
+      async execute (_id, p) { return { content: [{ type: 'text', text: 'ok' }], details: {}, structuredContent: { total: p.n * 2 } } },
+    }
+    const fromPi = makeTool(piTool, 'pkg', 'pi')
+    check('a pi outputSchema is read, not only a DSH one', !!fromPi.outputSchema && fromPi.outputSchema.properties.total.type === 'number', JSON.stringify(fromPi.outputSchema))
+    check('pi exposure deferred becomes deferred', fromPi.deferred === true)
+    check('pi sequential mode becomes sequentialOnly', fromPi.sequentialOnly === true)
+
+    const box = []
+    await replayIntoDsh({ tools: { register: (t) => box.push(t) } }, { capabilities: [fromPi], events: [], skillDirs: [] }, {})
+    const back = box[0]
+    check('DSH receives deferLoading', back.deferLoading === true)
+    check('DSH receives a concurrency classifier that refuses', typeof back.isConcurrencySafe === 'function' && back.isConcurrencySafe({}) === false)
+    const value = await back.execute({ n: 3 }, {})
+    check('the canonical value keeps its shape instead of being stringified', JSON.stringify(value) === '{"total":6}', JSON.stringify(value))
+  }
+
   console.log('adopting DSH packages that were installed as ordinary pi packages')
   {
     const { needsAdapter, entryDir, ADAPTER_DIR } = await import('../src/adopt.js')

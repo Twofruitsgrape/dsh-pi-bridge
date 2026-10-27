@@ -17,7 +17,7 @@
  * @module src/replay-dsh.js
  */
 import { mapEvent } from './capabilities.js'
-import { specToJsonSchema } from './schema.js'
+import { specToJsonSchema, jsonSchemaNodeToSpec } from './schema.js'
 
 const OUT_SCHEMA = {
   type: 'object',
@@ -58,16 +58,30 @@ export async function replayIntoDsh (ctx, captured, options) {
     if (cap.kind === 'tool') {
       if (!ctx || !ctx.tools || typeof ctx.tools.register !== 'function') { report.skipped.push('tools service missing; ' + name); continue }
       try {
+        // A pi tool that declares an output schema is promising structured data;
+        // wrapping it in the bridge envelope would replace that promise with a
+        // string. When it declares one, it owns the DSH output schema too.
+        const outSchema = cap.outputSchema ? jsonSchemaNodeToSpec(cap.outputSchema) : OUT_SCHEMA
         ctx.tools.register(defineTool({
           name,
           description: (cap.description || '(no description)') + ' [bridged by dsh-pi-bridge from ' + (cap.origin || 'pi') + ']',
           parameters: cap.spec,
           output: {
-            schema: OUT_SCHEMA,
-            render: (_args, value) => [{ type: 'text', text: (value && value.result) || '' }],
+            schema: outSchema,
+            render: (_args, value) => [{
+              type: 'text',
+              text: cap.outputSchema
+                ? (typeof value === 'string' ? value : JSON.stringify(value))
+                : ((value && value.result) || ''),
+            }],
           },
+          // The pi tool asked not to be declared up front, and said it cannot run
+          // beside a sibling; both have a DSH spelling.
+          ...(cap.deferred ? { deferLoading: true } : {}),
+          ...(cap.sequentialOnly ? { isConcurrencySafe: () => false } : {}),
           execute: async (args, exec) => {
             const out = await cap.run(args, exec)
+            if (cap.outputSchema && out.structured !== undefined && out.structured !== null) return out.structured
             return { ok: true, result: out.text || JSON.stringify(out.structured === undefined ? null : out.structured) }
           },
         }))
