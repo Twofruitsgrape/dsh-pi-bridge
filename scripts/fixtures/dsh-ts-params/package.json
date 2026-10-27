@@ -1,0 +1,16 @@
+{
+  "name": "dsh-ts-params-fixture",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./index.ts",
+  "keywords": [
+    "dsh",
+    "dsh-plugin"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "description": "Fixture: a DSH bundle whose TypeScript needs rewriting, not only stripping."
+}

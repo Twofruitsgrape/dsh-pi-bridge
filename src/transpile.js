@@ -25,7 +25,24 @@ export function stripAvailable () {
 
 /** @param {string} source @param {string} filePath @returns {string} */
 function strip (source, filePath) {
-  return require_('node:module').stripTypeScriptTypes(source, { mode: 'strip', sourceUrl: filePath })
+  const mod = require_('node:module')
+  try {
+    return mod.stripTypeScriptTypes(source, { mode: 'strip', sourceUrl: filePath })
+  } catch (stripError) {
+    /*
+     * `strip` only erases annotations. Syntax that has to be rewritten - a
+     * constructor's parameter properties, an enum, a namespace - is refused
+     * outright ("not supported in strip-only mode"), and the file was then
+     * skipped: measured on dshmarket, where src/backup.ts and four others are
+     * written that way, so the plugin arrived with nothing and looked empty.
+     * `transform` performs the same erasure plus those rewrites, so it is the
+     * correct fallback rather than a second opinion; strip stays first because
+     * it changes the least for the files that already work.
+     */
+    try {
+      return mod.stripTypeScriptTypes(source, { mode: 'transform', sourceUrl: filePath })
+    } catch { throw stripError }
+  }
 }
 
 /**

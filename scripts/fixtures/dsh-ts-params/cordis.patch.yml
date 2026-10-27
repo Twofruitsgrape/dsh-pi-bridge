@@ -1,0 +1,2 @@
+# Fixture bundle patch: this bundle registers through apply(), not a patch row.
+[]

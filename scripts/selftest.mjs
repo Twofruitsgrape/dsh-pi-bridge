@@ -1188,6 +1188,17 @@ async function main () {
     check('the supplied host never reuses a shipped profile name', !['web', 'sdk', 'acp', 'cmdline'].includes(sup.PROFILE), sup.PROFILE)
   }
 
+  console.log('TypeScript that needs rewriting, not only stripping')
+  {
+    // `strip` erases annotations and refuses anything that must be emitted - a
+    // constructor's parameter properties, an enum, a namespace. Before the
+    // transform fallback this fixture compiled to nothing and its tool vanished,
+    // which reads as an empty plugin rather than an uncompilable file.
+    const r = await loadForeign(path.join(ROOT, 'scripts', 'fixtures', 'dsh-ts-params'), { host: 'dsh' })
+    check('a parameter property compiles', (r.errors || []).length === 0, JSON.stringify(r.errors).slice(0, 240))
+    check('its tool survives the rewrite', (r.capabilities || []).some((c) => c.name === 'ts_param_echo'), JSON.stringify((r.capabilities || []).map((c) => c.name)))
+  }
+
   console.log('a daemon that cannot start says why, in seconds')
   {
     const { spawn: spawnProc } = await import('node:child_process')
