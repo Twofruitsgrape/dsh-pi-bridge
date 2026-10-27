@@ -94,8 +94,11 @@ export async function adoptOne (dir, options = {}) {
     source: options.source || dir,
   }), 'utf8')
 
-  // Keep pi's own fields untouched: only the manifest key this adapter needs.
-  pkg.pi = { ...(pkg.pi || {}), extensions: [...(pkg.pi?.extensions || []), './' + ADAPTER_DIR] }
+  // Point at the file, not the directory. Measured: a directory entry only
+  // resolves when it holds `index.js` or `index.ts`; ours has to be `.mjs`
+  // (the host package's own `type` is not ours to change), and a directory
+  // holding only `index.mjs` is silently not an extension at all.
+  pkg.pi = { ...(pkg.pi || {}), extensions: [...(pkg.pi?.extensions || []), './' + ADAPTER_DIR + '/index.mjs'] }
   await writeFile(pkgFile, JSON.stringify(pkg, null, 2) + '\n', 'utf8')
   return { changed: true, dir }
 }

@@ -88,6 +88,9 @@ export default async function dshConverted (pi) {
   const { ensureDshHost } = await import(${JSON.stringify(url('dsh-supervisor.js'))})
   const { dshHostLoad, dshHostCall, dshParamsToSchema } = await import(${JSON.stringify(url('dsh-host-client.js'))})
   const notify = (m, k) => { if (pi.ui && typeof pi.ui.notify === 'function') pi.ui.notify(m, k) }
+  // One line on stdout, because "the plugin is installed but nothing happened" is
+  // indistinguishable from "the adapter never loaded" without it.
+  console.log('[dsh-converted] ' + ${JSON.stringify(o.bundleName)} + ': loading')
 
   let host
   try {
