@@ -103,7 +103,11 @@ export function replayIntoPi (pi, captured, options) {
     for (const target of targets) {
       try { pi.on(target, (...args) => item.handler(...args)) } catch (e) { report.skipped.push('event ' + target + ': ' + shortMessage(e)) }
     }
-    report.events.push(item.event + ' -> ' + targets.join('|'))
+    // The name maps; the payload does not. This path only runs when no host could
+    // be supplied, so the handler observes that something happened, with pi's
+    // payload where it expected its own host's. Saying so is the difference
+    // between a degraded mode and a silent lie.
+    report.events.push(item.event + ' -> ' + targets.join('|') + ' (pi payloads, observation only)')
   }
   return report
 }

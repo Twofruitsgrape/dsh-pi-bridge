@@ -68,7 +68,7 @@ export function makeTool (raw, origin, sourceHost) {
   }
 }
 
-function makeCommand (raw, origin) {
+export function makeCommand (raw, origin, sourceHost) {
   return {
     kind: 'command',
     name: String(raw.name || 'unnamed').replace(/^\/+/, ''),
@@ -78,7 +78,13 @@ function makeCommand (raw, origin) {
     run: async (input, ctx) => {
       const handler = raw.handler || raw.run
       if (!handler) return { text: 'bridge command has no handler', isError: false }
-      const out = await handler(input, ctx)
+      // The two hosts hand a command handler different things: pi a string, DSH a
+      // `CommandInvocation` ({ name, rawInput }). Passing the string to a DSH
+      // handler made `invocation.rawInput` undefined in every command that read
+      // it - the command "worked" and answered nothing.
+      const out = sourceHost === 'dsh'
+        ? await handler({ name: String(raw.name || ''), rawInput: String(input ?? '') }, ctx)
+        : await handler(input, ctx)
       return projectResult(out === undefined ? { text: 'ok' } : out)
     },
   }
@@ -98,7 +104,7 @@ export function createPiRecorder (origin) {
       capabilities.push(makeTool(tool || {}, origin, SOURCE))
     },
     registerCommand (name, options) {
-      capabilities.push(makeCommand({ ...(options || {}), name }, origin))
+      capabilities.push(makeCommand({ ...(options || {}), name }, origin, SOURCE))
     },
     registerProvider (id, definition) {
       capabilities.push({ kind: 'provider', name: String(id || 'provider'), description: String((definition && definition.baseUrl) || ''), origin, run: async () => projectResult({ text: 'providers are not replayed across hosts' }), notes: ['provider registration is host-specific'] })
@@ -165,10 +171,10 @@ export function createDshRecorder (origin) {
       list: () => [],
     },
     commands: {
-      register (definition) { capabilities.push(makeCommand(definition || {}, origin)) },
+      register (definition) { capabilities.push(makeCommand(definition || {}, origin, SOURCE)) },
     },
     command: {
-      register (definition) { capabilities.push(makeCommand(definition || {}, origin)) },
+      register (definition) { capabilities.push(makeCommand(definition || {}, origin, SOURCE)) },
     },
     skills: {
       registerProvider (fn) {

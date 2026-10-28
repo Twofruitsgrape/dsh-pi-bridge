@@ -1331,6 +1331,27 @@ async function main () {
     check('the canonical value keeps its shape instead of being stringified', JSON.stringify(value) === '{"total":6}', JSON.stringify(value))
   }
 
+  console.log('commands hand each host the shape its handler expects')
+  {
+    const { makeCommand } = await import('../src/capture.js')
+    let seen
+    const cap = makeCommand({
+      name: '/greet',
+      description: 'x',
+      handler: async (invocation) => { seen = invocation; return { kind: 'success', text: 'hi' } },
+    }, 'demo', 'dsh')
+    await cap.run('alice', {})
+    check('a DSH command handler receives a CommandInvocation', !!seen && seen.name === '/greet' && seen.rawInput === 'alice', JSON.stringify(seen))
+    let seenPi
+    const cap2 = makeCommand({
+      name: 'p',
+      description: 'x',
+      handler: async (input) => { seenPi = input; return { text: 'ok' } },
+    }, 'pkg', 'pi')
+    await cap2.run('raw text', {})
+    check('a pi command handler receives the raw string', seenPi === 'raw text', JSON.stringify(seenPi))
+  }
+
   console.log('adopting DSH packages that were installed as ordinary pi packages')
   {
     const { needsAdapter, entryDir, ADAPTER_DIR } = await import('../src/adopt.js')

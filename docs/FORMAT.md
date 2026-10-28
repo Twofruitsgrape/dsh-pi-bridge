@@ -182,7 +182,8 @@ must be released in `session_shutdown`.
 | Tool result | canonical value from `execute` | `{ content, details }` | `output.render` produces the content; `details` holds the origin |
 | Tool cancellation | `exec.signal` | `signal` | = |
 | Tool execution context | `ctx.tools` registry | `ctx.executeTool()` | ≈, both run nested calls through the same hooks |
-| Events | `ctx.on` on harness events | `pi.on` on lifecycle events | ≈, names and payloads differ per event |
+| Events | `ctx.on` on harness events | `pi.on` on lifecycle events | **each side keeps its own**: in the forwarding architecture the plugin runs in its own host and receives real events, so nothing needs to cross. Only the degraded replay path maps names, and it says so - the payload the handler sees is the local host's, not the one it registered for |
+| Slash commands | `ctx.commands.register({ name, description, input?, handler })` | `pi.registerCommand(name, { description, handler })` | = , with one shape difference: DSH's handler receives a `CommandInvocation` (`{ name, rawInput }`), pi's receives the raw string - the bridge supplies each handler its own shape |
 | Blocking a call | pre-execute waterfall | `tool_call` returning `{ block }` | possible, but the payload shapes differ |
 | Skills | `ctx.skills.registerProvider` | `resources_discover` → `skillPaths` | = , directory passed through |
 | Slash commands | `ctx.commands.register` | `pi.registerCommand` | = |
